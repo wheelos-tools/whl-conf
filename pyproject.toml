@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whl_conf"
+version = "0.0.1"
+description = "wheelos conf management tool"
+readme = "README.md"
+authors = [
+  { name = "daohu527", email = "daohu527@gmail.com" }
+]
+urls = { Homepage = "https://github.com/wheelos-tools/whl-conf", "Bug Tracker" = "https://github.com/wheelos-tools/whl-conf/issues" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: GIS",
+  "Programming Language :: Python :: 3 :: Only"
+]
+requires-python = ">=3.6"
+dependencies = [
+  # todo: add your dependencies here
+]
+
+keywords = ["whl_conf", "wheelos"]
+
+[project.scripts]
+whl_conf = "whl_conf.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
