@@ -19,7 +19,7 @@ import logging
 import sys
 
 
-from aconf.config_manage import (
+from whl_conf.config_manage import (
     ConfigManager,
     ConfigError,
     ConfigNotFoundError,
