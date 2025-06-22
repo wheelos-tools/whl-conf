@@ -1,35 +1,53 @@
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "whl_conf"
-version = "0.0.1"
-description = "wheelos conf management tool"
+name = "whl-conf" # Use hyphens '-' over underscores '_' for consistency
+version = "0.0.1" # Semantic Versioning (SemVer)
+description = "A configuration management tool for WheelOS." # Concise description
 readme = "README.md"
 authors = [
   { name = "daohu527", email = "daohu527@gmail.com" }
 ]
 urls = { Homepage = "https://github.com/wheelos-tools/whl-conf", "Bug Tracker" = "https://github.com/wheelos-tools/whl-conf/issues" }
 classifiers = [
+  "Development Status :: 3 - Alpha", # Project's development stage
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.6", # Supported Python versions
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3 :: Only", # Python 3 only
+  "License :: OSI Approved :: MIT License", # Specify license type
   "Operating System :: OS Independent",
   "Intended Audience :: Developers",
-  "Topic :: Scientific/Engineering :: GIS",
-  "Programming Language :: Python :: 3 :: Only"
-]
-requires-python = ">=3.6"
-dependencies = [
-  # todo: add your dependencies here
+  "Topic :: Software Development :: Build Tools", # More specific category
+  "Topic :: Utilities"
 ]
 
-keywords = ["whl_conf", "wheelos"]
+# Python version requirements.
+requires-python = ">=3.6" # Consider >=3.8 or >=3.9 for newer features/security
+
+# Runtime dependencies
+dependencies = [
+  "filelock>=3.0.0,<4.0.0",
+]
+
+# Keywords for PyPI search.
+keywords = ["whl-conf", "wheelos", "configuration-management", "cli-tool"]
 
 [project.scripts]
-whl_conf = "whl_conf.main:main"
+# Command-line entry points.
+whl-conf = "whl_conf.cli:main" # Match CLI name to project name for consistency
 
 [tool.setuptools]
-package-dir = { "" = "." }
+package-dir = { "" = "." } # Root directory for Python packages
 
 [tool.setuptools.packages.find]
+# Automatically discover Python packages.
 where = ["."]
+# exclude = ["tests*", "docs*"]

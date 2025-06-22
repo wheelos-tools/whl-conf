@@ -1,0 +1,5 @@
+files:
+  - src: "vehicle_param.pb.txt"
+    dest: "modules/common/data/vehicle_param.pb.txt"
+  - src: "control_conf.pb.txt"
+    dest: "modules/control/conf/control_conf.pb.txt"
