@@ -1,7 +1,0 @@
-files:
-  - src: "control_conf.pb.txt"
-    dest: "modules/control/conf/control_conf.pb.txt"
-  - src: "control.conf"
-    dest: "modules/control/conf/control.conf"
-  - src: "cancard_params"
-    dest: "modules/canbus/conf"

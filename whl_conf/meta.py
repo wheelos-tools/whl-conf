@@ -1,206 +1,363 @@
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime
+from typing import Dict, Any, Optional, List, Union
+from datetime import datetime, timezone
 import logging
+import re
+from dataclasses import dataclass, field, asdict
+
+# --- Custom Exceptions (Unchanged, they are well-defined) ---
 
 
 class MetaError(Exception):
-    "..."
+    "Generic metadata error"
 
 
 class MetaFileNotFoundError(MetaError):
-    "..."
+    "Meta file not found"
 
 
 class MetaFormatError(MetaError):
-    "..."
+    "Meta file format error"
 
 
 class MetaValidationError(MetaError):
-    "..."
+    "Meta value validation error"
 
 
+# --- Helper Functions (Improved for clarity and robustness) ---
+def _to_iso(dt: datetime) -> str:
+    """Converts a datetime object to a UTC ISO 8601 string with 'Z'."""
+    if dt.tzinfo is None:
+        # Assume naive datetimes are in the system's local timezone and convert to UTC
+        dt = dt.astimezone(timezone.utc)
+    else:
+        # Convert timezone-aware datetimes to UTC
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _from_iso(s: str) -> Optional[datetime]:
+    """Parses an ISO 8601 string (including 'Z' format) into a datetime object."""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        # Handle 'Z' for UTC timezone directly, which is more robust
+        if s.upper().endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        logging.warning(f"Could not parse timestamp '{s}'.")
+        return None
+
+
+def _is_semver_like(v: str) -> bool:
+    """Validates if a string loosely follows semantic versioning patterns."""
+    if not isinstance(v, str):
+        return False
+    semver_pattern = re.compile(
+        r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$")
+    return bool(semver_pattern.match(v))
+
+
+# --- Data Models (Using dataclasses for clarity and automation) ---
+@dataclass
+class Maintainer:
+    """A data model for a maintainer, with built-in validation."""
+    name: str
+    email: str = ""
+    role: str = ""
+
+    def __post_init__(self):
+        """Perform validation and normalization after initialization."""
+        if not self.name or not isinstance(self.name, str):
+            raise MetaValidationError(
+                "Maintainer 'name' must be a non-empty string.")
+        self.name = self.name.strip()
+        self.email = str(self.email).strip()
+        self.role = str(self.role).strip()
+
+
+@dataclass
 class MetaInfo:
     """
     A self-validating data class for configuration metadata.
-    It ensures that its instances are always in a valid state.
+    It uses modern dataclasses to define its structure and handle serialization.
     """
-    # Use class attributes for schema definition
-    REQUIRED_FIELDS: Tuple[str, ...] = ('name', 'version')
-    OPTIONAL_FIELDS: Dict[str, Any] = {
-        'description': '', 'author': '', 'email': '', 'tags': list,
-        'category': '', 'dependencies': list, 'notes': '',
-        'created_from': '', 'renamed_from': ''
-    }
+    # --- Required & Core Fields ---
+    version: str
+    config_id: str
+    created_at: datetime
+    updated_at: datetime
+    maintainers: List[Maintainer] = field(default_factory=list)
 
-    def __init__(self, **kwargs):
-        # Initialize all known fields to their defaults or None
-        self._data: Dict[str, Any] = {
-            field: default() if callable(default) else default
-            for field, default in self.OPTIONAL_FIELDS.items()
-        }
-        self._data.update({field: None for field in self.REQUIRED_FIELDS})
+    # --- Optional Business/Context Fields ---
+    vehicle_vin: Optional[str] = None
+    hardware_hash: Optional[str] = None
+    wheelos_hash: Optional[str] = None
+    description: Optional[str] = None
 
-        # Store custom fields separately
-        self._extra_fields: Dict[str, Any] = {}
+    # --- Other Standard Optional Fields (can be removed if truly unused) ---
+    notes: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
 
-        # Set initial values, triggering property setters for validation
-        all_initial_data = kwargs.copy()
-        for key, value in all_initial_data.items():
-            # Use setattr to invoke property setters
-            setattr(self, key, value)
+    # --- Extra fields not part of the formal model ---
+    extra_fields: Dict[str, Any] = field(default_factory=dict, repr=False)
 
-        # Final validation for required fields
-        for field in self.REQUIRED_FIELDS:
-            if self._data.get(field) is None:
-                raise MetaValidationError(
-                    f"Required field '{field}' was not provided.")
-
-        # Set timestamps
-        self.created_at = datetime.now()
-        self._data['updated_at'] = self.created_at
-
-    @property
-    def name(self) -> str:
-        return self._data['name']
-
-    @name.setter
-    def name(self, value: str):
-        if not value or not isinstance(value, str):
+    def __post_init__(self):
+        """Post-initialization validation and normalization."""
+        if not _is_semver_like(self.version):
             raise MetaValidationError(
-                "Field 'name' must be a non-empty string.")
-        self._data['name'] = value
-        self._touch()
-
-    @property
-    def version(self) -> str:
-        return self._data['version']
-
-    @version.setter
-    def version(self, value: str):
-        if not value or not isinstance(value, str):
-            raise MetaValidationError(
-                "Field 'version' must be a non-empty string.")
-        # Basic semver check could go here
-        self._data['version'] = value
-        self._touch()
-
-    @property
-    def tags(self) -> List[str]:
-        return self._data['tags']
-
-    @tags.setter
-    def tags(self, value: List[str]):
-        if not isinstance(value, list):
-            raise MetaValidationError("Field 'tags' must be a list.")
-        # Store unique, sorted tags
-        self._data['tags'] = sorted(list(set(value)))
-        self._touch()
-
-    def _touch(self):
-        """Updates the 'updated_at' timestamp."""
-        self._data['updated_at'] = datetime.now()
-
-    def get(self, field: str, default: Any = None) -> Any:
-        """Safely gets a field from standard, optional, or extra fields."""
-        if field in self._data:
-            return self._data[field]
-        return self._extra_fields.get(field, default)
-
-    def set(self, field: str, value: Any):
-        """Sets any field, routing to properties or extra fields."""
-        if hasattr(self, field):
-            setattr(self, field, value)
-        else:
-            self._extra_fields[field] = value
-            self._touch()
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serializes the object to a dictionary for YAML output."""
-        # Start with required and optional fields from internal data
-        output_dict = {
-            key: value for key, value in self._data.items()
-            # Include required fields even if "empty"
-            if value or key in self.REQUIRED_FIELDS
-        }
-        # Convert datetime objects to ISO 8601 strings for serialization
-        if 'created_at' in output_dict:
-            output_dict['created_at'] = output_dict['created_at'].isoformat()
-        if 'updated_at' in output_dict:
-            output_dict['updated_at'] = output_dict['updated_at'].isoformat()
-
-        # Add non-empty extra fields
-        output_dict.update({k: v for k, v in self._extra_fields.items() if v})
-        return output_dict
+                f"Version '{self.version}' is not a valid semantic version.")
+        # Ensure tags are unique and sorted
+        if self.tags:
+            self.tags = sorted(list(set(str(t).strip()
+                               for t in self.tags if str(t).strip())))
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'MetaInfo':
-        """Creates an instance from a dictionary, handling string timestamps."""
+    def from_dict(cls, data: Dict[str, Any]) -> "MetaInfo":
+        """Factory method to create a MetaInfo instance from a dictionary."""
         if not isinstance(data, dict):
             raise MetaFormatError(
-                f"Metadata must be a dictionary, but got {type(data)}.")
+                f"Metadata must be a dictionary, got {type(data)}.")
 
-        init_data = data.copy()
+        # Separate known fields from extra fields
+        known_field_names = {f.name for f in cls.__dataclass_fields__.values()}
+        init_data = {k: v for k, v in data.items() if k in known_field_names}
+        extra_data = {k: v for k,
+                      v in data.items() if k not in known_field_names}
 
-        # Convert string timestamps back to datetime objects before init if they exist
-        created_at_str = init_data.pop('created_at', None)
-        # We always generate a new 'updated_at'
-        init_data.pop('updated_at', None)
-
-        instance = cls(**init_data)
-
-        # Manually set the created_at from the file to preserve it
-        if created_at_str:
+        # --- Handle special field conversions ---
+        # Maintainers: Convert list of dicts to list of Maintainer objects
+        if 'maintainers' in init_data and isinstance(init_data['maintainers'], list):
             try:
-                instance.created_at = datetime.fromisoformat(created_at_str)
-            except (ValueError, TypeError):
-                logging.warning(
-                    f"Invalid 'created_at' format '{created_at_str}'. Ignoring.")
+                init_data['maintainers'] = [Maintainer(
+                    **m) for m in init_data['maintainers']]
+            except (TypeError, MetaValidationError) as e:
+                raise MetaFormatError(
+                    f"Invalid 'maintainers' structure: {e}") from e
 
-        return instance
+        # Timestamps: Convert ISO strings to datetime objects
+        now = datetime.now(timezone.utc)
+        init_data['created_at'] = _from_iso(
+            init_data.get('created_at', '')) or now
+        # If updated_at is missing or invalid, it defaults to created_at
+        init_data['updated_at'] = _from_iso(init_data.get(
+            'updated_at', '')) or init_data['created_at']
+
+        # Add extras
+        init_data['extra_fields'] = extra_data
+
+        try:
+            return cls(**init_data)
+        except (TypeError, MetaValidationError) as e:
+            # Catches missing required fields like 'version' or 'config_id'
+            raise MetaFormatError(
+                f"Failed to create MetaInfo from dictionary: {e}") from e
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes the object to a dictionary for YAML/JSON output."""
+        # asdict correctly handles nested dataclasses
+        data = asdict(self)
+
+        # Pop the extra_fields container and merge its contents
+        extras = data.pop('extra_fields', {})
+        data.update(extras)
+
+        # Convert datetimes to ISO strings
+        data['created_at'] = _to_iso(self.created_at)
+        data['updated_at'] = _to_iso(self.updated_at)
+
+        # Filter out fields that are None or empty lists, except for required ones
+        required_fields = {'version', 'config_id',
+                           'created_at', 'updated_at', 'maintainers'}
+        return {
+            key: value for key, value in data.items()
+            if value or key in required_fields
+        }
+
+    def pretty_print(self) -> None:
+        """
+        Prints the metadata in a clean, human-readable format to the console.
+        This method fulfills the requirement of having a built-in pretty printer.
+        """
+        data = self.to_dict()
+
+        # Define the desired order of keys for printing
+        # This also filters which keys to show, matching the user request
+        display_order = [
+            'version', 'config_id', 'description', 'maintainers',
+            'vehicle_vin', 'hardware_hash', 'wheelos_hash',
+            'tags', 'notes', 'created_at', 'updated_at'
+        ]
+
+        # Calculate padding for clean alignment
+        # We only consider the keys that are actually present in the data
+        present_keys = [key for key in display_order if key in data]
+        if not present_keys:
+            print("  No metadata to display.")
+            return
+
+        max_key_length = max(len(key) for key in present_keys)
+
+        print("  Metadata:")
+        for key in display_order:
+            if key in data:
+                value = data[key]
+                # Skip printing empty optional fields
+                # Add other must-show fields if any
+                if not value and key not in {'version', 'config_id'}:
+                    continue
+
+                # Format values for readability
+                display_value = ""
+                if isinstance(value, list):
+                    if not value:
+                        continue  # Don't print empty lists
+                    if all(isinstance(v, dict) for v in value):
+                        # Special, more detailed format for list of maintainers
+                        display_value = "\n" + "\n".join(
+                            f"{' ' * (max_key_length + 6)}- Name: {v.get('name', 'N/A')}, Email: {v.get('email', 'N/A')}, Role: {v.get('role', 'N/A')}"
+                            for v in value
+                        )
+                    else:
+                        display_value = ", ".join(map(str, value))
+                else:
+                    display_value = str(value)
+
+                # Print the aligned key-value pair
+                print(f"    {key:<{max_key_length}} : {display_value}")
+
+# --- Manager Class (Largely unchanged, but now interacts with the new MetaInfo) ---
 
 
 class MetaManager:
-    """A service to manage the lifecycle (load/save) of a MetaInfo object."""
+    """
+    Manages the lifecycle (create, load, update, save) of a MetaInfo object
+    associated with a configuration.
+    """
     META_FILENAME = "meta.yaml"
 
-    def __init__(self, config_path: Path):
-        self.config_path = config_path
+    def __init__(self, config_path: Union[Path, str]):
+        self.config_path = Path(config_path)
         self.meta_path = self.config_path / self.META_FILENAME
         self._meta_info: Optional[MetaInfo] = None
-
-        if self.meta_path.is_file():
-            self.load()
+        # We remove the automatic load from __init__ to make the behavior
+        # more predictable. Loading now happens explicitly or lazily.
 
     def exists(self) -> bool:
         """Checks if the meta.yaml file exists on disk."""
         return self.meta_path.is_file()
 
-    def load(self):
-        """Loads meta.yaml from disk, creating a MetaInfo object."""
+    def load(self, force_reload: bool = False) -> MetaInfo:
+        """
+        Loads metadata from the meta.yaml file into memory.
+        If already loaded, returns the cached version unless force_reload is True.
+
+        Args:
+            force_reload: If True, bypasses the cache and re-reads from disk.
+
+        Returns:
+            The loaded MetaInfo object.
+
+        Raises:
+            MetaFileNotFoundError: If the meta file does not exist.
+            MetaFormatError: If the file is corrupt or has an invalid format.
+        """
+        if self._meta_info and not force_reload:
+            return self._meta_info
+
         if not self.exists():
             raise MetaFileNotFoundError(
-                f"Meta file not found at '{self.meta_path}'.")
+                f"Meta file not found at '{self.meta_path}'. Cannot load.")
         try:
-            with self.meta_path.open('r', encoding='utf-8') as f:
+            with self.meta_path.open("r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             self._meta_info = MetaInfo.from_dict(data)
-        except (yaml.YAMLError, MetaError) as e:
-            logging.error(
-                f"Failed to load or parse meta file '{self.meta_path}': {e}")
-            self._meta_info = None  # Ensure invalid state doesn't persist
-            raise MetaFormatError(f"Invalid meta file: {e}") from e
+            return self._meta_info
+        except (yaml.YAMLError, Exception) as e: # Catch broader exceptions during parsing
+            raise MetaFormatError(
+                f"Invalid or corrupt meta file '{self.meta_path}': {e}") from e
 
-    def save(self):
-        """Saves the current MetaInfo object to meta.yaml."""
-        if self._meta_info is None:
+    def get_meta(self, lazy_load: bool = True) -> Optional[MetaInfo]:
+        """
+        Gets the metadata object, optionally loading it from disk if not already in memory.
+
+        Args:
+            lazy_load: If True, attempts to load from disk if not already loaded.
+
+        Returns:
+            The MetaInfo object, or None if it doesn't exist and cannot be loaded.
+        """
+        if self._meta_info:
+            return self._meta_info
+        if lazy_load and self.exists():
+            try:
+                return self.load()
+            except MetaError:
+                return None # Failed to load, so return None
+        return None
+
+    def update(self, **kwargs: Any) -> MetaInfo:
+        """
+        Updates fields of the metadata object in memory.
+
+        This method supports lazy loading: if metadata is not yet loaded, it will
+        be loaded from disk first. The 'updated_at' timestamp is automatically handled.
+        This does NOT save changes to disk until `save()` is called.
+
+        Args:
+            **kwargs: Key-value pairs of attributes to update.
+
+        Returns:
+            The updated MetaInfo object.
+
+        Raises:
+            MetaError: If the metadata does not exist and cannot be loaded,
+                       or if an invalid field is provided.
+        """
+        # Step 1: Ensure we have a MetaInfo object to work with (Lazy Loading)
+        if not self._meta_info:
+            try:
+                self.load()
+            except MetaFileNotFoundError as e:
+                raise MetaError(
+                    "Cannot update metadata: No metadata loaded in memory and no "
+                    f"file exists at '{self.meta_path}' to load from.") from e
+
+        # We can now be sure self._meta_info is not None.
+        current_data = self._meta_info.to_dict()
+
+        # Step 2: Atomically apply the updates
+        # This checks for invalid keys before applying anything.
+        valid_keys = set(current_data.keys())
+        for key in kwargs:
+            if key not in valid_keys:
+                raise MetaError(f"Invalid metadata field: '{key}'. "
+                                f"Valid fields are: {list(valid_keys)}")
+
+        current_data.update(kwargs)
+
+        # Step 3: Recreate the object from the updated data to ensure validation.
+        # The 'updated_at' timestamp will be handled by the save() method later.
+        self._meta_info = MetaInfo.from_dict(current_data)
+        return self._meta_info
+
+    def save(self) -> None:
+        """
+        Saves the current in-memory metadata to the meta.yaml file.
+        Automatically sets the 'updated_at' timestamp.
+        """
+        if not self._meta_info:
             raise MetaError(
-                "No metadata to save. Load or create metadata first.")
+                "No metadata to save. Call create_meta() or load() first.")
+
+        # Automatically update the 'updated_at' timestamp on every save
+        self._meta_info.updated_at = datetime.now(timezone.utc)
 
         self.config_path.mkdir(parents=True, exist_ok=True)
         try:
-            with self.meta_path.open('w', encoding='utf-8') as f:
+            with self.meta_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(
                     self._meta_info.to_dict(), f,
                     allow_unicode=True, default_flow_style=False, sort_keys=False
@@ -208,34 +365,3 @@ class MetaManager:
         except IOError as e:
             raise MetaError(
                 f"Failed to write to meta file '{self.meta_path}': {e}") from e
-
-    def get_meta(self) -> Optional[MetaInfo]:
-        """
-        Returns the loaded MetaInfo object for manipulation.
-        Returns None if no meta file exists or it failed to load.
-        """
-        return self._meta_info
-
-    def create_meta(self, name: str, version: str = "1.0.0", **kwargs):
-        """
-        Creates a new MetaInfo object and sets it as the manager's current metadata.
-        This does NOT save it to disk until `save()` is called.
-        """
-        all_data = {'name': name, 'version': version, **kwargs}
-        self._meta_info = MetaInfo(**all_data)
-
-    def summary_info(self) -> Dict[str, Any]:
-        """
-        Returns a summary of the current metadata for display purposes.
-        This does not include extra fields.
-        """
-        if self._meta_info is None:
-            return {}
-
-        summary = {
-            'name': self._meta_info.name,
-            'version': self._meta_info.version,
-            'description': self._meta_info.get('description', ''),
-            'author': self._meta_info.get('author', ''),
-        }
-        return summary

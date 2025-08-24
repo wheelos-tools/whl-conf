@@ -1,14 +1,19 @@
-import filecmp
 import logging
 import shutil
-import tarfile
+import uuid
+from datetime import datetime, timezone
+import os
+import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+import urllib.request
+import zipfile
+import shutil
+import tempfile
 
-
-from whl_conf.manifest import ManifestManager, ManifestError
 from whl_conf.meta import MetaManager, MetaError
 from whl_conf.confs_lock import attribute_lock, LockError
+from whl_conf.config_compare import ConfigComparator
 
 # Use logging instead of print for library-level code
 logger = logging.getLogger(__name__)
@@ -39,8 +44,8 @@ class ConfigPermissionError(ConfigError):
     pass
 
 
-class ConfigLayoutError(ConfigError):
-    """Exception raised for errors related to the layout file."""
+class ConfigActiveError(ConfigError):
+    """Exception raised for issues with the active configuration."""
     pass
 
 
@@ -51,6 +56,9 @@ class ConfigManager:
     names passed as arguments, ensuring thread safety and logical consistency.
     """
 
+    MANIFEST_FILE = ".config.manifest"
+    CONF_DIR = "data/confs"
+
     def __init__(self, base_dir: str = '.'):
         """
         Initializes the configuration manager.
@@ -59,19 +67,11 @@ class ConfigManager:
             base_dir: The root directory of the configuration repository.
         """
         self.base_dir = Path(base_dir).resolve()
-        self.confs_dir = self.base_dir / 'confs'
+        self.confs_dir = self.base_dir / self.CONF_DIR
+        self.manifest_path = self.confs_dir / self.MANIFEST_FILE
         self.current_link_path = self.confs_dir / 'current'
-        self._ensure_directories_exist()
 
     # --- Private Helper Methods ---
-
-    def _ensure_directories_exist(self):
-        """Ensures the main confs directory exists."""
-        try:
-            self.confs_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise ConfigPermissionError(
-                f"Cannot create confs directory {self.confs_dir}: {e}") from e
 
     def _get_config_path(self, config_name: str) -> Path:
         """Validates a config name and returns its full path."""
@@ -80,8 +80,6 @@ class ConfigManager:
         if any(c in config_name for c in r'/\..:*?<>|' + '\x00'):
             raise ValueError(
                 f"Config name '{config_name}' contains illegal characters.")
-        if config_name.lower() in ['current']:
-            raise ValueError(f"'{config_name}' is a reserved name.")
         return self.confs_dir / config_name
 
     def _config_exists(self, config_name: str) -> bool:
@@ -96,11 +94,6 @@ class ConfigManager:
         config_path = self._get_config_path(config_name)
         return MetaManager(config_path)
 
-    def _get_manifest_manager_for(self, config_name: str) -> ManifestManager:
-        """Factory for creating a ManifestManager for a specific config."""
-        config_path = self._get_config_path(config_name)
-        return ManifestManager(config_path)
-
     def _get_active_config_name_unlocked(self) -> Optional[str]:
         """Gets the active config name. Assumes a lock is already held."""
         if not self.current_link_path.is_symlink():
@@ -114,159 +107,274 @@ class ConfigManager:
             return None
         return None
 
-    # --- Public API Methods (Locked) ---
-    @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def get_active_config(self) -> Optional[str]:
-        """
-        Returns the name of the currently active configuration.
-        This is a locked, read-only operation.
-        """
-        # This public method can be locked if needed, but it's often better to have
-        # an unlocked internal version for other methods to use.
-        # For simplicity in this case, we'll assume it's fast enough not to require a lock
-        # if it's just a read, but for consistency let's lock it.
-        return self._get_active_config_name_unlocked()
+    def _read_manifest(self) -> List[Path]:
+        """Safely read and parse manifest files."""
+        if not self.manifest_path.is_file():
+            return []
+        try:
+            with self.manifest_path.open('r') as f:
+                data = json.load(f)
+            return [Path(p) for p in data]
+        except (json.JSONDecodeError, TypeError):
+            logging.warning(
+                "Manifest file is corrupted or improperly formatted. Treating as empty manifest.")
+            return []
 
+    def _write_manifest(self, relative_paths: List[Path]):
+        """Atomically write the manifest file."""
+        paths_as_str = [str(p) for p in relative_paths]
+        temp_path = self.manifest_path.with_suffix(
+            f".tmp-{os.urandom(4).hex()}")
+        with temp_path.open('w') as f:
+            json.dump(paths_as_str, f, indent=2)
+        os.rename(temp_path, self.manifest_path)
+
+    def _get_all_configs(self) -> list[dict]:
+        """
+        Retrieves a list of all available configurations with their metadata.
+
+        This method is the core data-gathering logic, designed for reusability.
+        It is not directly locked; locking should be handled by the calling method.
+
+        Returns:
+            A list of dictionaries, where each dictionary represents a configuration.
+            Example: [{'name': 'config1', 'description': 'Desc1', 'is_active': False}]
+        """
+        try:
+            active_name = self._get_active_config_name_unlocked()
+        except Exception:
+            active_name = None
+
+        configs_data = []
+
+        for conf_path in self.confs_dir.glob("*/"):
+            if not conf_path.is_dir() or conf_path.is_symlink():
+                continue
+
+            config_name = conf_path.name
+            description = "N/A"
+
+            try:
+                meta_mgr = MetaManager(conf_path)
+                if meta_mgr.exists():
+                    meta = meta_mgr.get_meta()
+                    if meta:
+                        description = meta.to_dict().get(
+                            'description', 'No description.')
+
+            except MetaError as e:
+                logging.warning(
+                    f"Could not read or parse metadata for '{config_name}': {e}")
+                description = "[Error reading metadata]"
+
+            configs_data.append({
+                "name": config_name,
+                "description": description,
+                "is_active": config_name == active_name,
+            })
+        return sorted(configs_data, key=lambda x: x['name'])
+
+    def _get_config_details(self, config_name: str) -> dict:
+        """
+        Gathers comprehensive details for a specific configuration.
+        (This function is already well-structured and remains unchanged)
+
+        Args:
+            config_name: The name of the configuration.
+
+        Returns:
+            A dictionary containing detailed configuration information.
+
+        Raises:
+            ConfigNotFoundError: If the configuration does not exist.
+        """
+        if not self._config_exists(config_name):
+            raise ConfigNotFoundError(
+                f"Configuration '{config_name}' not found.")
+
+        config_path = self._get_config_path(config_name)
+
+        # 1. Calculate directory size with robust error handling
+        size_kb = "N/A"
+        try:
+            total_size_bytes = sum(
+                f.stat().st_size for f in config_path.rglob('*') if f.is_file())
+            size_kb = total_size_bytes / 1024
+        except Exception as e:
+            logging.warning(
+                f"Could not calculate directory size for '{config_name}': {e}")
+
+        # 2. Load full metadata using MetaManager and get the MetaInfo object
+        meta_mgr = self._get_meta_manager_for(config_name)
+        # We now need the object itself, not its dict form yet
+        meta_info_object = meta_mgr.get_meta()
+
+        # 3. Assemble the final structured data
+        return {
+            "name": config_name,
+            "isActive": config_name == self._get_active_config_name_unlocked(),
+            "path": str(config_path),
+            "sizeKB": size_kb,
+            "meta_object": meta_info_object,
+        }
+
+    def _deactivate_current_unlocked(self):
+        """
+        Safely deactivates the current configuration by removing all links
+        listed in the manifest file.
+        """
+        manifest_entries = self._read_manifest()
+        if not manifest_entries:
+            logging.info(
+                "No manifest found or manifest is empty. Nothing to deactivate.")
+            return
+
+        logging.info("Deactivating current configuration based on manifest...")
+        # Iterate in reverse to handle nested files before their parent directories
+        for rel_path in reversed(manifest_entries):
+            link_path = self.base_dir / rel_path
+
+            # Only remove what we expect to be a symlink managed by us.
+            if link_path.is_symlink():
+                try:
+                    # Defensive check: ensure the link points somewhere inside our configs root
+                    if self.confs_dir in link_path.resolve(strict=True).parents:
+                        link_path.unlink()
+                        # Attempt to remove the parent directory if it's now empty
+                        try:
+                            link_path.parent.rmdir()
+                        except OSError:
+                            pass  # Directory not empty, which is fine.
+                except FileNotFoundError:
+                    pass  # Link is broken, ignore.
+            elif not link_path.exists():
+                pass  # Link already gone, ignore.
+            else:
+                logging.warning(
+                    f"Skipping cleanup of '{link_path}' because it is a real file, not a symlink.")
+
+        # Clean up the manifest and the 'current' symlink itself
+        self.manifest_path.unlink(missing_ok=True)
+        self.current_link_path.unlink(missing_ok=True)
+        logging.info("Deactivation complete.")
+
+    def _update_current_link_unlocked(self, target_path: Path):
+        """Atomically updates the 'current' symlink to point to the target path."""
+        # Create a temporary link first
+        temp_link = self.current_link_path.with_suffix(
+            f'.tmp-{os.urandom(4).hex()}')
+
+        # Point the temporary link to the new target directory
+        temp_link.symlink_to(target_path.resolve())
+
+        # Atomically rename the temp link to the final name, overwriting the old one.
+        os.rename(temp_link, self.current_link_path)
+
+    def _rollback_creation(self, paths_to_delete: List[Path]):
+        """Rolls back a failed activation by deleting all paths created."""
+        for rel_path in reversed(paths_to_delete):
+            link_path = self.base_dir / rel_path
+            if link_path.is_symlink():
+                link_path.unlink(missing_ok=True)
+                try:
+                    link_path.parent.rmdir()
+                except OSError:
+                    pass  # Not empty, ignore.
+
+    # --- Public API Methods (Locked) ---
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
     def list_configs(self):
         """
         Lists all available configurations, printing them directly to the console.
 
-        - This operation is thread-safe due to the decorator lock.
-        - It highlights the currently active configuration with a '*'.
+        This is the user-facing method that handles locking and console output.
         """
         try:
-            # An unlocked helper is called from within the locked method
-            active_name = self._get_active_config_name_unlocked()
-
-            # Use a temporary list to hold data for sorting before printing
-            configs_to_print = []
-
-            if not self.confs_dir.is_dir():
-                print("Configuration directory does not exist.")
-                return
-
-            for entry in self.confs_dir.iterdir():
-                # We only care about directories, and we must ignore the 'current' symlink
-                if entry.is_dir() and not entry.is_symlink():
-                    config_name = entry.name
-                    description = "N/A"
-                    try:
-                        # Create a manager for the specific config being inspected
-                        meta_mgr = self._get_meta_manager_for(config_name)
-                        meta = meta_mgr.get_meta()
-                        if meta:
-                            description = meta.get(
-                                'description', 'No description.')
-
-                    except MetaError as e:
-                        # Log the detailed error for debugging purposes
-                        logger.warning(
-                            f"Could not read metadata for '{config_name}': {e}")
-                        description = "[Error reading metadata]"
-
-                    configs_to_print.append({
-                        "name": config_name,
-                        "description": description,
-                    })
-
-            if not configs_to_print:
+            all_configs = self._get_all_configs()
+            if not all_configs:
                 print("No configurations found.")
                 return
 
-            # Sort the configurations alphabetically by name before printing
-            sorted_configs = sorted(configs_to_print, key=lambda x: x['name'])
-
             print("Available Configurations:")
-            print("-------------------------")
-            for config in sorted_configs:
-                # Add the '*' prefix if the config is the active one
-                prefix = "* " if config['name'] == active_name else "  "
-                # Use formatted string for clean, aligned output
+            print(f"{'':<2} {'Name':<25} | {'Description'}")
+            print("-" * 45)
+
+            has_active = False
+            for config in all_configs:
+                prefix = "* " if config['is_active'] else "  "
+                if config['is_active']:
+                    has_active = True
+
                 print(
                     f"{prefix}{config['name']:<25} | {config['description']}")
-            print("-------------------------")
-            if active_name:
-                print(f"(* = active configuration)")
+
+            print("-" * 45)
+            if has_active:
+                print("(* = active configuration)")
 
         except LockError as e:
-            # It's good practice for the method to handle its own lock errors
-            logger.error(
+            logging.error(
                 f"Failed to list configurations due to a lock error: {e}")
-            print(
-                "Error: Could not acquire a lock to read configurations. Please try again.")
+            print(f"\n[Error] Could not acquire lock. Please try again.")
         except Exception as e:
-            logger.error(
+            logging.error(
                 f"An unexpected error occurred while listing configurations: {e}", exc_info=True)
-            print("An unexpected error occurred. Check logs for details.")
+            print(
+                f"\n[Error] An unexpected error occurred. Check logs for details.")
 
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def show_info(self, config_name: str) -> Dict[str, Any]:
+    def show_config(self, config_name: str) -> None:
         """
-        Retrieves and prints a summary of information for a given configuration.
+        Retrieves and prints a detailed summary for a given configuration.
+
+        This method now delegates the complex task of metadata formatting
+        to the MetaInfo object's `pretty_print` method, simplifying its own logic.
 
         Args:
-            config_name (str): The name of the configuration to retrieve info for.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing the summary information.
-                            Keys are in English.
-        Raises:
-            ConfigNotFoundError: If the specified configuration does not exist.
+            config_name: The name of the configuration to display.
         """
-        if not self._config_exists(config_name):
-            raise ConfigNotFoundError(f"Configuration '{config_name}' not found.")
-
-        config_path = self._get_config_path(config_name)
-
-        # Initialize summary dictionary with common fields
-        summary: Dict[str, Any] = {
-            "name": config_name,
-            "isActive": config_name == self._get_active_config_name_unlocked(),
-            "path": str(config_path),
-            "sizeKB": 0, # Default to 0, calculate below
-        }
-
-        # Calculate directory size
         try:
-            summary["sizeKB"] = sum(
-                f.stat().st_size for f in config_path.rglob('*') if f.is_file()
-            ) / 1024
+            # Step 1: Gather all the necessary information and objects
+            details = self._get_config_details(config_name)
+            meta_info = details.get("meta_object")
+
+            # --- Presentation Logic ---
+            print(f"Configuration Details: [{details['name']}]")
+            print("-" * 40)
+
+            # Step 2: Print the basic, non-metadata information
+            print(
+                f"  Status : {'Active' if details['isActive'] else 'Inactive'}")
+            print(f"  Path   : {details['path']}")
+            if isinstance(details['sizeKB'], (int, float)):
+                print(f"  Size   : {details['sizeKB']:.2f} KB")
+            else:
+                print(f"  Size   : {details['sizeKB']}")
+
+            # Step 3: Delegate metadata printing to the meta object
+            # The MetaInfo object now handles its own rich representation.
+            if meta_info:
+                meta_info.pretty_print()
+            else:
+                print("\n  Metadata:")
+                print("    No metadata found (meta.yaml might be missing or empty).")
+
+            print("-" * 40)
+
+        except ConfigNotFoundError as e:
+            print(f"[Error] {e}")
         except Exception as e:
-            logger.warning(f"Could not calculate size for '{config_name}': {e}")
-            summary["sizeKB"] = "N/A" # Indicate if size calculation failed
-
-        # Get Meta Info Summary using helper
-        meta_mgr = self._get_meta_manager_for(config_name)
-        summary["metadata"] = meta_mgr.summary_info()
-
-        # Get Manifest Info Summary using helper
-        manifest_mgr = self._get_manifest_manager_for(config_name)
-        summary["manifest"] = manifest_mgr.summary_info()
-
-        # Print the summary in a user-friendly English format
-        print(f"--- Configuration: ---")
-        print(f"  Name: {summary['name']}")
-        print(f"  Status: {'Active' if summary['isActive'] else 'Inactive'}")
-        print(f"  Path: {summary['path']}")
-        print(f"  Size: {summary['sizeKB']:.2f} KB" if isinstance(summary['sizeKB'], (int, float)) else f"  Size: {summary['sizeKB']}")
-
-        print("\n  Metadata:")
-        meta_summary = summary['metadata']
-        print(f"    Version: {meta_summary.get('version', 'N/A')}")
-        print(f"    Description: {meta_summary.get('description', 'N/A')}")
-        print(f"    Author: {meta_summary.get('author', 'N/A')}")
-        print(f"    Created At: {meta_summary.get('createdAt', 'N/A')}")
-        print(f"    Updated At: {meta_summary.get('updatedAt', 'N/A')}")
-
-        print("\n  Manifest:")
-        manifest_summary = summary['manifest']
-        print(f"    Files Configured: {manifest_summary['filesCount']}")
-        return summary
+            logging.error(
+                f"An unexpected error occurred in show_info for '{config_name}': {e}",
+                exc_info=True
+            )
+            print("[Error] An unexpected error occurred. See logs for details.")
 
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
     def create_config(self, template_name: str, new_config_name: str):
         """Creates a new configuration from a template."""
+        if new_config_name in ['current']:
+            raise ValueError(f"'current' is a reserved name.")
         if not self._config_exists(template_name):
             raise ConfigNotFoundError(
                 f"Template configuration '{template_name}' not found.")
@@ -282,9 +390,12 @@ class ConfigManager:
 
             # Atomically update the new meta file
             meta_mgr = self._get_meta_manager_for(new_config_name)
-            meta_mgr.load()  # Load the copied meta info
-            meta_mgr.update(name=new_config_name, created_from=template_name)
-            meta_mgr.save()  # Save changes
+            meta_mgr.update(
+                config_id=str(uuid.uuid4()),
+                created_at=datetime.now(timezone.utc),
+                description=f"Created from template '{template_name}'"
+            )
+            meta_mgr.save()
         except (OSError, MetaError) as e:
             # Atomic cleanup
             if new_config_path.exists():
@@ -295,6 +406,8 @@ class ConfigManager:
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
     def delete_config(self, config_name: str):
         """Deletes a configuration."""
+        if config_name in ['current']:
+            raise ValueError(f"'current' is a reserved name.")
         if not self._config_exists(config_name):
             raise ConfigNotFoundError(
                 f"Configuration '{config_name}' not found.")
@@ -310,267 +423,274 @@ class ConfigManager:
                 f"Failed to delete '{config_name}': {e}") from e
 
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def activate_config(self, config_name: str):
-        """Activates a configuration, deactivating the previous one."""
-        if not self._config_exists(config_name):
+    def activate_config(self, config_name: str, dry_run: bool = False) -> None:
+        """
+        Activates a specified configuration using a manifest-driven,
+        transactional approach for maximum safety.
+
+        Args:
+            config_name: The name of the configuration to activate.
+            dry_run: If True, prints the actions that would be taken without
+                     making any changes to the file system.
+        """
+        if config_name in ['current']:
+            raise ValueError(f"'current' is a reserved name.")
+        source_config_path = self._get_config_path(config_name)
+        if not source_config_path.is_dir():
             raise ConfigNotFoundError(
-                f"Configuration '{config_name}' not found.")
+                f"Configuration '{config_name}' not found or is not a directory.")
 
-        # Step 1: Deactivate the current configuration
-        current_active = self._get_active_config_name_unlocked()
-        if current_active:
-            if current_active == config_name:
-                logger.info(
-                    f"Configuration '{config_name}' is already active.")
-                return  # Nothing to do
-            logger.info(
-                f"Deactivating current configuration: '{current_active}'")
-            self._deactivate_unlocked(current_active)
+        active_config_name = self._get_active_config_name_unlocked()
 
-        # Step 2: Activate the new configuration
-        logger.info(f"Activating new configuration: '{config_name}'")
-        self._activate_unlocked(config_name)
+        # Idempotency check
+        if active_config_name == config_name and not dry_run:
+            print(
+                f"Configuration '{config_name}' is already active. No action needed.")
+            return
 
-    # These helpers are not locked, as they are part of the `activate_config` unit of work.
-    def _deactivate_unlocked(self, config_name: str):
-        """Internal logic to remove symlinks for a configuration."""
+        if dry_run:
+            print(f"--- Dry Run: Activating '{config_name}' ---")
+
+        # --- Phase 1: Plan deactivation ---
+        # No actual deactivation happens in dry_run, we just report it
+        if active_config_name and active_config_name != config_name:
+            if dry_run:
+                print(
+                    f"[DRY RUN] Would deactivate the current configuration: '{active_config_name}'")
+            else:
+                logging.info(
+                    f"Deactivating current configuration: '{active_config_name}'")
+                self._deactivate_current_unlocked()
+        elif not active_config_name and dry_run:
+            print("[DRY RUN] No active configuration to deactivate.")
+
+        # --- Phase 2: Plan new configuration links ---
+        actions_to_perform = []
+        for item in source_config_path.rglob('*'):
+            if not item.is_file() or item.name == "meta.yaml":
+                continue
+
+            relative_path = item.relative_to(source_config_path)
+            link_path = self.base_dir / relative_path
+
+            action = "CREATE"
+            if link_path.is_symlink():
+                action = "REPLACE"
+            elif link_path.exists():
+                action = "OVERWRITE_FILE"
+
+            actions_to_perform.append(
+                {'action': action, 'link': link_path, 'target': item})
+
+        if dry_run:
+            print(
+                f"[DRY RUN] The following {len(actions_to_perform)} links would be managed:")
+            for act in actions_to_perform:
+                print(
+                    f"  - {act['action']:<15} '{act['link']}' -> '{act['target']}'")
+            print("--- End of Dry Run ---")
+            return
+
+        # --- Phase 3: Execute Activation (only if not a dry run) ---
+        logging.info(f"Activating configuration: '{config_name}'")
+        newly_created_paths: List[Path] = []
         try:
-            manifest_mgr = self._get_manifest_manager_for(config_name)
-            if not manifest_mgr.exists():
-                return
-            manifest_mgr.load()
-            for mapping in manifest_mgr.file_mappings:
-                dest_path = Path(mapping.dest)
-                if dest_path.is_symlink():
-                    dest_path.unlink()
-        except (ManifestError, OSError) as e:
-            logger.error(
-                f"Error during deactivation of '{config_name}': {e}", exc_info=True)
+            for act in actions_to_perform:
+                link_path = act['link']
+                item = act['target']
+                relative_path = item.relative_to(source_config_path)
+                newly_created_paths.append(relative_path)
+
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                if link_path.exists() or link_path.is_symlink():
+                    if link_path.is_dir() and not link_path.is_symlink():
+                        shutil.rmtree(link_path)
+                    else:
+                        link_path.unlink()
+                link_path.symlink_to(item.resolve())
+
+            # Commit the new state
+            self._write_manifest(newly_created_paths)
+            self._update_current_link_unlocked(source_config_path)
+            print(f"Successfully activated configuration '{config_name}'.")
+            logging.info(
+                f"Successfully activated configuration '{config_name}'.")
+        except Exception as e:
+            logging.error(
+                f"Failed to activate configuration '{config_name}': {e}", exc_info=True)
+            self._rollback_creation(newly_created_paths)
             raise ConfigError(
-                f"Failed to cleanly deactivate '{config_name}'.") from e
-
-    def _activate_unlocked(self, config_name: str):
-        """Internal logic to create symlinks for a configuration."""
-        config_path = self._get_config_path(config_name)
-        manifest_mgr = self._get_manifest_manager_for(config_name)
-        if not manifest_mgr.exists():
-            raise ConfigError(
-                f"Cannot activate '{config_name}': manifest.yaml not found.")
-
-        manifest_mgr.load()
-        if manifest_mgr.validate_files_exist():
-            raise ConfigError(
-                f"Cannot activate '{config_name}': one or more source files are missing.")
-
-        try:
-            # Create file symlinks
-            for mapping in manifest_mgr.file_mappings:
-                src_path = config_path / mapping.src
-                dest_path = Path(mapping.dest)
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                if dest_path.exists() or dest_path.is_symlink():
-                    dest_path.unlink()  # Ensure destination is clean
-                dest_path.symlink_to(src_path.resolve())
-
-            # Update the 'current' symlink
-            if self.current_link_path.exists() or self.current_link_path.is_symlink():
-                self.current_link_path.unlink()
-            self.current_link_path.symlink_to(config_path)
-        except (ManifestError, OSError) as e:
-            logger.error(
-                f"Error during activation of '{config_name}': {e}", exc_info=True)
-            # Attempt a rollback
-            self._deactivate_unlocked(config_name)
-            raise ConfigError(
-                f"Failed to activate '{config_name}'. System may be in an inconsistent state.") from e
-
+                f"Activation failed and has been rolled back.") from e
 
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
     def diff_configs(self, config1_name: str, config2_name: str) -> Dict[str, Any]:
         """
-        Compares two configurations and returns a structured dictionary of the differences.
+        Compares two configurations using a dedicated comparator and returns a structured diff.
 
-        This method is designed to provide data that a UI layer can format and display.
+        The output is cleanly categorized into 'added', 'removed', 'modified',
+        and 'unmodified' files, making it easy for a UI or script to consume.
+
+        Args:
+            config1_name: The name of the base configuration.
+            config2_name: The name of the configuration to compare against the base.
+
+        Returns:
+            A dictionary containing the comparison results.
         """
-        if not self._config_exists(config1_name):
-            raise ConfigNotFoundError(
-                f"Configuration '{config1_name}' not found.")
-        if not self._config_exists(config2_name):
-            raise ConfigNotFoundError(
-                f"Configuration '{config2_name}' not found.")
+        if config1_name == config2_name:
+            raise ConfigError("Cannot compare a configuration with itself.")
 
-        config1_path = self._get_config_path(config1_name)
-        config2_path = self._get_config_path(config2_name)
+        # --- 1. Validation and Path Retrieval ---
+        path1 = self._get_config_path(config1_name)
+        path2 = self._get_config_path(config2_name)
 
-        mgr1 = self._get_manifest_manager_for(config1_name)
-        mgr2 = self._get_manifest_manager_for(config2_name)
+        # --- 2. Delegation to Comparator ---
+        comparator = ConfigComparator(path1, path2)
+        comparison_result = comparator.compare()
 
-        # Load manifests, handling cases where they might not exist
-        if mgr1.exists():
-            mgr1.load()
-        if mgr2.exists():
-            mgr2.load()
-
-        comparison = mgr1.compare_with(mgr2)
-
-        # Now, check file content for common files
-        content_diffs = []
-        for src in comparison['common_files']:
-            file1 = config1_path / src
-            file2 = config2_path / src
-            # Ensure both files exist before comparing
-            if file1.is_file() and file2.is_file():
-                if not filecmp.cmp(file1, file2, shallow=False):
-                    content_diffs.append(src)
-
-        comparison['content_different_files'] = content_diffs
-
-        return {
+        # --- 3. Assemble the final data structure ---
+        result_data = {
             'config1': config1_name,
             'config2': config2_name,
-            'comparison': comparison
+            'comparison': comparison_result
         }
 
+        # --- 4. Delegation to Presenter (for console output) ---
+        print(comparator.format_report())
+
+        return result_data
+
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def rename_config(self, old_name: str, new_name: str):
+    def rename_config(self, old_name: str, new_name: str) -> None:
         """
-        Renames a configuration, including its directory and internal metadata.
-        Also updates the 'current' symlink if the renamed config was active.
+        Renames a configuration directory based on a safe workflow.
+
+        This operation is intentionally prohibited if the configuration to be
+        renamed is currently active, forcing a "deactivate first" workflow
+        to ensure runtime stability.
+
+        Args:
+            old_name: The current name of the configuration.
+            new_name: The desired new name for the configuration.
+
+        Raises:
+            ConfigNotFoundError: If the configuration `old_name` does not exist.
+            ConfigAlreadyExistsError: If a configuration with `new_name` already exists.
+            OperationForbiddenError: If attempting to rename the currently active configuration.
+            ConfigError: For other generic or OS-level errors during the rename.
         """
-        if not self._config_exists(old_name):
+        if old_name in ['current'] or new_name in ['current']:
+            raise ValueError(f"'current' is a reserved name.")
+        # 1. If 'a' (old_name) does not exist, exit.
+        old_path = self._get_config_path(old_name)
+        if not old_path or not old_path.is_dir():
             raise ConfigNotFoundError(
                 f"Configuration to rename, '{old_name}', not found.")
 
-        # Validate the new name before any operations
-        # This will raise ValueError on invalid names
+        # 2. If 'b' (new_name) already exists, exit.
+        # This also validates the new_name format implicitly.
         new_path = self._get_config_path(new_name)
-        if self._config_exists(new_name):
+        if new_path.exists():
             raise ConfigAlreadyExistsError(
                 f"Target configuration name '{new_name}' already exists.")
 
-        old_path = self._get_config_path(old_name)
-        is_active = (old_name == self._get_active_config_name_unlocked())
+        # 3. If 'a' is the active configuration, exit.
+        active_config_name = self._get_active_config_name_unlocked()
+        if active_config_name == old_name:
+            raise ConfigError(
+                f"Cannot rename '{old_name}' because it is the currently active configuration. "
+                "Please deactivate it first.")
 
+        # If all checks pass, the operation is simple and safe.
         try:
-            # 1. Rename the directory
+            # 4. Rename the directory 'a' to 'b'.
             old_path.rename(new_path)
-
-            # 2. Update the meta.yaml file inside the newly named directory
-            meta_mgr = self._get_meta_manager_for(new_name)
-            if meta_mgr.exists():
-                meta_mgr.load()
-                meta_mgr.update(name=new_name, renamed_from=old_name)
-                meta_mgr.save()
-
-            # 3. If it was active, update the 'current' symlink to point to the new path
-            if is_active:
-                if self.current_link_path.exists() or self.current_link_path.is_symlink():
-                    self.current_link_path.unlink()
-                self.current_link_path.symlink_to(new_path)
-
-        except (OSError, MetaError) as e:
-            # Attempt to roll back the rename if it failed midway
-            if new_path.exists() and not old_path.exists():
-                new_path.rename(old_path)
+            logging.info(
+                f"Successfully renamed configuration '{old_name}' to '{new_name}'.")
+        except OSError as e:
+            # The rename operation is generally atomic on POSIX systems,
+            # so a complex rollback is rarely needed. We catch OS errors
+            # and wrap them in our custom exception type.
+            logging.error(f"An OS error occurred during rename: {e}")
             raise ConfigError(
-                f"Failed to rename '{old_name}' to '{new_name}': {e}") from e
+                f"Failed to rename '{old_name}' to '{new_name}'.") from e
 
-    @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def export_config(self, config_name: str, archive_path_str: str) -> Path:
+
+    @attribute_lock(attr_name='confs_dir', timeout=60.0)
+    def pull_config(self, config_name: str) -> None:
         """
-        Exports a specified configuration to a .tar.gz archive.
+        Downloads a configuration from a URL, unpacks it, and installs it.
 
-        Returns:
-            The final Path object of the created archive.
-
-        Raises:
-            ConfigError if the config is missing files.
-        """
-        if not self._config_exists(config_name):
-            raise ConfigNotFoundError(
-                f"Configuration to export, '{config_name}', not found.")
-
-        config_path = self._get_config_path(config_name)
-        archive_path = Path(archive_path_str)
-
-        # Ensure correct suffix
-        if not archive_path.name.endswith('.tar.gz'):
-            archive_path = archive_path.with_suffix('.tar.gz')
-
-        # Ensure parent directory exists
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Validate configuration integrity before exporting
-        manifest_mgr = self._get_manifest_manager_for(config_name)
-        if manifest_mgr.exists():
-            manifest_mgr.load()
-            missing_files = manifest_mgr.validate_files_exist()
-            if missing_files:
-                # The caller (CLI) can catch this and prompt the user if desired
-                raise ConfigError(
-                    f"Export failed: Config '{config_name}' is incomplete. "
-                    f"Missing files: {', '.join(missing_files)}"
-                )
-
-        try:
-            with tarfile.open(archive_path, "w:gz") as tar:
-                # arcname ensures the files are inside a directory named after the config
-                tar.add(config_path, arcname=config_path.name)
-
-            logger.info(
-                f"Successfully exported '{config_name}' to '{archive_path}'")
-            return archive_path
-        except (tarfile.TarError, OSError) as e:
-            raise ConfigError(
-                f"Failed to create archive for '{config_name}': {e}") from e
-
-    @attribute_lock(attr_name='confs_dir', timeout=10.0)
-    def import_config(self, archive_path_str: str, overwrite: bool = False) -> str:
-        """
-        Imports a configuration from a .tar.gz archive.
+        This method downloads a .zip archive from the given URL to a temporary
+        location, unpacks it, and moves it to the configurations directory.
+        The operation is designed to be atomic; it will clean up after itself
+        if any step fails.
 
         Args:
-            archive_path_str: Path to the .tar.gz file.
-            overwrite (bool): If True, overwrite an existing configuration with the same name.
-                              If False, an exception is raised if the config exists.
+            config_name: The name to assign to the new configuration.
+            url: The URL of the .zip archive to download.
 
-        Returns:
-            The name of the imported configuration.
+        Raises:
+            ConfigAlreadyExistsError: If a configuration with the target name already exists.
+            ConfigError: For network errors, file errors, or if the zip archive
+                        is invalid.
         """
-        archive_path = Path(archive_path_str)
-        if not archive_path.is_file():
-            raise FileNotFoundError(
-                f"Archive file not found at '{archive_path}'")
+        url = "https://github.com/wheelos/wheel.os/releases/download/v1.0.0/{}.zip".format(config_name)
+        logging.info(
+            f"Attempting to pull configuration '{config_name}' from {url}")
+        target_path = self._get_config_path(config_name)
+        if self._config_exists(config_name):
+            raise ConfigAlreadyExistsError(
+                f"Cannot pull configuration: '{config_name}' already exists.")
 
-        try:
-            with tarfile.open(archive_path, "r:gz") as tar:
-                members = tar.getnames()
-                if not members:
-                    raise ConfigError("Archive is empty.")
+        # Use a temporary directory to handle all artifacts.
+        # This ensures everything is cleaned up automatically on exit or failure.
+        with tempfile.TemporaryDirectory(suffix="_conf_pull") as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            zip_path = temp_dir_path / "download.zip"
 
-                # The config name is the top-level directory in the archive
-                config_name = Path(members[0]).parts[0]
-                self._get_config_path(config_name)  # Validates the name
+            # 1. Download the file
+            try:
+                logging.info(f"Downloading from {url}")
+                # Use a proper user-agent to avoid being blocked by some servers.
+                req = urllib.request.Request(
+                    url, headers={'User-Agent': 'whl-conf-cli/1.0'})
+                with urllib.request.urlopen(req) as response, open(zip_path, 'wb') as out_file:
+                    shutil.copyfileobj(response, out_file)
+            except urllib.error.URLError as e:
+                raise ConfigError(
+                    f"Network error while downloading from {url}: {e}") from e
+            except Exception as e:
+                raise ConfigError(f"Failed to download file: {e}") from e
 
-                target_path = self._get_config_path(config_name)
+            # 2. Unpack the zip file
+            unpacked_root = temp_dir_path / "unpacked"
+            try:
+                logging.info(f"Unpacking archive: {zip_path}")
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(unpacked_root)
+            except zipfile.BadZipFile as e:
+                raise ConfigError(
+                    f"Downloaded file from {url} is not a valid zip archive.") from e
 
-                if target_path.exists():
-                    if not overwrite:
-                        raise ConfigAlreadyExistsError(
-                            f"Configuration '{config_name}' already exists. "
-                            "Use overwrite option to replace it."
-                        )
-                    logger.info(
-                        f"Overwriting existing configuration '{config_name}'")
-                    shutil.rmtree(target_path)
+            # 3. Find the actual content directory within the unpacked archive.
+            # Often, zip files contain a single root folder.
+            # e.g., template.zip -> ./template/all-the-files
+            unpacked_items = list(unpacked_root.iterdir())
+            if len(unpacked_items) == 1 and unpacked_items[0].is_dir():
+                source_dir = unpacked_items[0]
+                logging.debug(
+                    f"Zip contains a single root directory: '{source_dir.name}'")
+            else:
+                source_dir = unpacked_root
+                logging.debug("Zip contents will be used directly from the root.")
 
-                # Extract the archive into the `confs` directory
-                tar.extractall(path=self.confs_dir)
-                logger.info(
-                    f"Successfully imported and extracted '{config_name}'.")
-
-                return config_name
-
-        except (tarfile.TarError, OSError, ValueError) as e:
-            raise ConfigError(
-                f"Failed to import from archive '{archive_path}': {e}") from e
+            # 4. Move the final, unpacked directory to the target location.
+            # This is the final atomic operation.
+            try:
+                shutil.move(str(source_dir), str(target_path))
+                logging.info(
+                    f"Successfully pulled and installed configuration '{config_name}'.")
+            except OSError as e:
+                raise ConfigError(
+                    f"Failed to move unpacked configuration to final destination: {e}") from e

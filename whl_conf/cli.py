@@ -18,7 +18,7 @@
 import argparse
 import logging
 import sys
-from typing import Dict, Callable, Any
+from typing import Dict, Callable
 
 from whl_conf.config import ConfigManager
 from whl_conf.config import (
@@ -40,7 +40,7 @@ def handle_list(manager: ConfigManager, args: argparse.Namespace):
 
 def handle_info(manager: ConfigManager, args: argparse.Namespace):
     """Handle 'info' command"""
-    manager.show_info(args.config_name)
+    manager.show_config(args.config_name)
 
 
 def handle_create(manager: ConfigManager, args: argparse.Namespace):
@@ -52,7 +52,7 @@ def handle_create(manager: ConfigManager, args: argparse.Namespace):
 
 def handle_delete(manager: ConfigManager, args: argparse.Namespace):
     """Handle 'delete' command"""
-    manager.delete_config(args.config_name, force=args.force)
+    manager.delete_config(args.config_name)
 
 
 def handle_activate(manager: ConfigManager, args: argparse.Namespace):
@@ -69,15 +69,9 @@ def handle_rename(manager: ConfigManager, args: argparse.Namespace):
     """Handle 'rename' command"""
     manager.rename_config(args.old_name, args.new_name)
 
-
-def handle_export(manager: ConfigManager, args: argparse.Namespace):
-    """Handle 'export' command"""
-    manager.export_config(args.archive_path)
-
-
-def handle_import(manager: ConfigManager, args: argparse.Namespace):
-    """Handle 'import' command"""
-    manager.import_config(args.archive_file, auto_active=args.activate)
+def handle_pull(manager: ConfigManager, args: argparse.Namespace):
+    """Handle 'pull' command"""
+    manager.pull_config(config_name=args.name)
 
 # ==============================================================================
 # Main Application
@@ -102,8 +96,9 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(
-        dest='command', required=True, help='Available commands'
+        dest='command', required=False, help='Available commands'
     )
+    parser.set_defaults(command="list")
 
     # 1. list
     subparsers.add_parser("list", help="List all available configs")
@@ -114,20 +109,23 @@ def create_parser() -> argparse.ArgumentParser:
     # 3. create
     parser_create = subparsers.add_parser(
         "create", help="Create a new config set from a template")
-    parser_create.add_argument("template_name", help="Template config name")
+    parser_create.add_argument(
+        "template_name",
+        nargs="?",
+        default="template",
+        help="Template config name (default: 'template')"
+    )
     parser_create.add_argument("new_config_name", help="New config name")
     # 4. delete
     parser_delete = subparsers.add_parser(
         "delete", help="Delete the specified config")
     parser_delete.add_argument("config_name", help="Config name")
-    parser_delete.add_argument(
-        "--force", action="store_true", help="Skip confirmation, force delete")
     # 5. activate
     parser_activate = subparsers.add_parser(
         "activate", help="Activate the specified config set")
     parser_activate.add_argument("config_name", help="Config name")
     parser_activate.add_argument(
-        "--dry-run", action="store_true", help="Print actions only, do not execute")
+        "--dry_run", action="store_true", default=False, help="Print actions only, do not execute")
     # 6. diff
     parser_diff = subparsers.add_parser(
         "diff", help="Compare file contents of two config sets")
@@ -137,16 +135,15 @@ def create_parser() -> argparse.ArgumentParser:
     parser_rename = subparsers.add_parser("rename", help="Rename a config set")
     parser_rename.add_argument("old_name", help="Old config name")
     parser_rename.add_argument("new_name", help="New config name")
-    # 8. export
-    parser_export = subparsers.add_parser(
-        "export", help="Export the currently active config as a tar.gz archive")
-    parser_export.add_argument("archive_path", help="Archive output path")
-    # 9. import
-    parser_import = subparsers.add_parser(
-        "import", help="Import a tar.gz config archive")
-    parser_import.add_argument("archive_file", help="tar.gz archive path")
-    parser_import.add_argument(
-        "--activate", action="store_true", help="Activate immediately after import")
+
+    parser_pull = subparsers.add_parser(
+        "pull", help="Download a config set from a URL and install it")
+    parser_pull.add_argument(
+        "name",
+        nargs="?",
+        default="template",
+        help="Local name to give the new config (default: 'template')"
+    )
 
     return parser
 
@@ -176,8 +173,7 @@ def main():
             "activate": handle_activate,
             "diff": handle_diff,
             "rename": handle_rename,
-            "export": handle_export,
-            "import": handle_import,
+            "pull": handle_pull
         }
 
         # Get and execute the command handler

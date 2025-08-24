@@ -1,0 +1,1 @@
+# Check if some files exist, e.g., vehicle configs
