@@ -59,7 +59,7 @@ class ConfigManager:
     MANIFEST_FILE = ".config.manifest"
     CONF_DIR = "data/confs"
 
-    def __init__(self, base_dir: str = '.'):
+    def __init__(self, base_dir: str):
         """
         Initializes the configuration manager.
 

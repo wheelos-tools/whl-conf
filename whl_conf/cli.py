@@ -87,8 +87,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Global arguments
     parser.add_argument(
-        "--conf-dir", type=str, default=".",
-        help="Config repository root directory (contains confs/ folder), default is current directory"
+        "--conf-dir", type=str, default="/apollo",
+        help="Config repository root directory (contains confs/ folder), default is /apollo"
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
