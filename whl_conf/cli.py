@@ -73,6 +73,16 @@ def handle_pull(manager: ConfigManager, args: argparse.Namespace):
     """Handle 'pull' command"""
     manager.pull_config(config_name=args.name)
 
+def handle_add(manager: ConfigManager, args: argparse.Namespace):
+    """Handle 'add' command"""
+    logging.info(f"Attempting to add paths to active config: {args.source_paths}")
+    manager.add_active_config(args.source_paths, dry_run=args.dry_run)
+
+def handle_remove(manager: ConfigManager, args: argparse.Namespace):
+    """Handle 'remove' command"""
+    logging.info(f"Attempting to remove paths from active config: {args.paths_to_remove}")
+    manager.remove_active_config(args.paths_to_remove, dry_run=args.dry_run)
+
 # ==============================================================================
 # Main Application
 # ==============================================================================
@@ -135,7 +145,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser_rename = subparsers.add_parser("rename", help="Rename a config set")
     parser_rename.add_argument("old_name", help="Old config name")
     parser_rename.add_argument("new_name", help="New config name")
-
+    # 8. pull
     parser_pull = subparsers.add_parser(
         "pull", help="Download a config set from a URL and install it")
     parser_pull.add_argument(
@@ -143,6 +153,36 @@ def create_parser() -> argparse.ArgumentParser:
         nargs="?",
         default="template",
         help="Local name to give the new config (default: 'template')"
+    )
+    # 9. add
+    parser_add = subparsers.add_parser(
+        "add",
+        help="Add files or directories to the active configuration.",
+        description="Adds one or more files/directories to the currently active config by creating symlinks and updating the manifest. This operation is transactional and idempotent."
+    )
+    parser_add.add_argument(
+        "source_paths",
+        nargs='+',
+        help="One or more source paths (files or directories) to add to the active config."
+    )
+    parser_add.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Print actions only, do not execute."
+    )
+    # 10. remove
+    parser_remove = subparsers.add_parser(
+        "remove",
+        help="Remove files or directories from the active configuration.",
+        description="Removes links corresponding to the given paths from the system and the manifest. Only affects links managed by the active config."
+    )
+    parser_remove.add_argument(
+        "paths_to_remove",
+        nargs='+',
+        help="One or more paths (files or directories) to remove from the active config."
+    )
+    parser_remove.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Print actions only, do not execute."
     )
 
     return parser
@@ -158,8 +198,6 @@ def main():
     logging.basicConfig(
         level=log_level, format='%(levelname)s: %(message)s', stream=sys.stdout)
 
-    # Output logs to stdout instead of stderr, which is more typical for CLI tools
-
     try:
         # Initialize core manager
         conf_manager = ConfigManager(base_dir=args.conf_dir)
@@ -173,7 +211,9 @@ def main():
             "activate": handle_activate,
             "diff": handle_diff,
             "rename": handle_rename,
-            "pull": handle_pull
+            "pull": handle_pull,
+            "add": handle_add,
+            "remove": handle_remove
         }
 
         # Get and execute the command handler

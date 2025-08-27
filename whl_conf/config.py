@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import os
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 import urllib.request
 import zipfile
 import shutil
@@ -46,6 +46,15 @@ class ConfigPermissionError(ConfigError):
 
 class ConfigActiveError(ConfigError):
     """Exception raised for issues with the active configuration."""
+    pass
+
+
+class ManifestNotFoundError(ConfigError):
+    """Exception raised when a manifest file is not found."""
+    pass
+
+class PathNotInConfigError(ConfigError):
+    """Exception raised when an operation is forbidden."""
     pass
 
 
@@ -281,6 +290,24 @@ class ConfigManager:
                 except OSError:
                     pass  # Not empty, ignore.
 
+    def _resolve_source_paths_to_files(self, source_paths: List[str]) -> Set[Path]:
+        """Helper to recursively find all files given a list of paths."""
+        all_files: Set[Path] = set()
+        for path_str in source_paths:
+            source_path = Path(path_str).resolve()
+            if not source_path.exists():
+                raise FileNotFoundError(
+                    f"Source path '{path_str}' does not exist.")
+
+            if source_path.is_file():
+                all_files.add(source_path)
+            elif source_path.is_dir():
+                for item in source_path.rglob('*'):
+                    if item.is_file():
+                        all_files.add(item)
+        return all_files
+
+
     # --- Public API Methods (Locked) ---
     @attribute_lock(attr_name='confs_dir', timeout=10.0)
     def list_configs(self):
@@ -443,17 +470,12 @@ class ConfigManager:
         active_config_name = self._get_active_config_name_unlocked()
 
         # Idempotency check
-        if active_config_name == config_name and not dry_run:
-            print(
-                f"Configuration '{config_name}' is already active. No action needed.")
-            return
-
         if dry_run:
             print(f"--- Dry Run: Activating '{config_name}' ---")
 
         # --- Phase 1: Plan deactivation ---
         # No actual deactivation happens in dry_run, we just report it
-        if active_config_name and active_config_name != config_name:
+        if active_config_name:
             if dry_run:
                 print(
                     f"[DRY RUN] Would deactivate the current configuration: '{active_config_name}'")
@@ -635,7 +657,8 @@ class ConfigManager:
             ConfigError: For network errors, file errors, or if the zip archive
                         is invalid.
         """
-        url = "https://github.com/wheelos/wheel.os/releases/download/v1.0.0/{}.zip".format(config_name)
+        url = "https://github.com/wheelos/wheel.os/releases/download/v1.0.0/{}.zip".format(
+            config_name)
         logging.info(
             f"Attempting to pull configuration '{config_name}' from {url}")
         target_path = self._get_config_path(config_name)
@@ -694,3 +717,214 @@ class ConfigManager:
             except OSError as e:
                 raise ConfigError(
                     f"Failed to move unpacked configuration to final destination: {e}") from e
+
+    @attribute_lock(attr_name='confs_dir', timeout=10.0)
+    def add_active_config(self, source_paths: List[str], dry_run: bool = False):
+        """
+        Adds files or directories to the active configuration.
+
+        This method follows a copy-then-link approach:
+        1. Copies the source file into the active config's directory, creating a snapshot.
+        2. Creates a symlink in the base directory that points to the copied file.
+        This operation is transactional and will forcefully overwrite existing files or
+        links at the target destination.
+
+        Args:
+            source_paths: A list of source file or directory paths to add.
+            dry_run: If True, only print the actions that would be taken.
+        """
+        active_config_name = self._get_active_config_name_unlocked()
+        if not active_config_name:
+            raise ConfigActiveError("Cannot add: No configuration is currently active.")
+
+        active_config_path = self._get_config_path(active_config_name)
+
+        if dry_run:
+            print(f"--- Dry Run: Adding to active config '{active_config_name}' ---")
+
+        # --- Phase 1: Planning and Validation ---
+        actions_to_perform = []
+        current_manifest_paths = {p for p in self._read_manifest()}
+        all_source_files = self._resolve_source_paths_to_files(source_paths)
+
+        for source_file in all_source_files:
+            try:
+                relative_path = source_file.relative_to(self.base_dir)
+            except ValueError:
+                raise ValueError(f"Source path '{source_file}' must be inside the base directory '{self.base_dir}'.")
+
+            if relative_path in current_manifest_paths:
+                logging.info(f"Path '{relative_path}' is already in the manifest. Skipping.")
+                continue
+
+            # Define the two-step paths
+            copy_destination = active_config_path / relative_path
+            link_path = self.base_dir / relative_path
+
+            actions_to_perform.append({
+                'source': source_file,
+                'copy_dest': copy_destination,
+                'link': link_path,
+                'relative': relative_path
+            })
+
+        if not actions_to_perform:
+            print("No new files to add. All specified paths are already in the manifest.")
+            return
+
+        if dry_run:
+            print(f"The following {len(actions_to_perform)} actions would be performed:")
+            for act in actions_to_perform:
+                print(f"  - COPY '{act['source']}'\n    -> TO '{act['copy_dest']}'")
+                print(f"  - LINK '{act['link']}'\n    -> TO '{act['copy_dest']}'")
+            print("--- End of Dry Run ---")
+            return
+
+        # --- Phase 2: Execution with Enhanced Rollback ---
+        newly_created_copies: List[Path] = []
+        newly_created_links: List[Path] = []
+        try:
+            logging.info(f"Adding {len(actions_to_perform)} new file(s) to '{active_config_name}'.")
+
+            for act in actions_to_perform:
+                copy_dest = act['copy_dest']
+                link = act['link']
+
+                # Step 1: Copy file into the active config directory
+                copy_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(act['source'], copy_dest) # copy2 preserves metadata
+                newly_created_copies.append(copy_dest)
+
+                # Step 2: Create the symlink, forcefully overwriting any existing target
+                link.parent.mkdir(parents=True, exist_ok=True)
+
+                # Forcefully remove whatever is at the destination path
+                if link.is_symlink():
+                    link.unlink()
+                elif link.is_file():
+                    link.unlink()
+                elif link.is_dir():
+                    shutil.rmtree(link)
+
+                link.symlink_to(copy_dest)
+                newly_created_links.append(link)
+
+            # --- Phase 3: Commit ---
+            final_manifest_paths = current_manifest_paths.union({act['relative'] for act in actions_to_perform})
+            self._write_manifest(list(final_manifest_paths))
+
+            print(f"Successfully added files to active configuration '{active_config_name}'.")
+            logging.info("Add operation complete and manifest updated.")
+
+        except Exception as e:
+            logging.error(f"Failed to add to configuration: {e}", exc_info=True)
+            print("Error occurred. Rolling back changes...")
+
+            # Rollback in reverse order of creation
+            for lnk in reversed(newly_created_links):
+                lnk.unlink(missing_ok=True)
+            for cpy in reversed(newly_created_copies):
+                cpy.unlink(missing_ok=True)
+
+            # An additional step could be to clean up empty directories created
+            logging.info("Rollback complete.")
+            raise ConfigError("Add operation failed and has been rolled back.") from e
+
+
+    @attribute_lock(attr_name='confs_dir', timeout=10.0)
+    def remove_active_config(self, paths_to_remove: List[str], dry_run: bool = False):
+        """
+        Removes files or directories from the active configuration. This is the
+        mirror operation of `add_active_config`.
+
+        It performs a two-step deletion for each managed path:
+        1. Deletes the symlink from the base directory.
+        2. Deletes the corresponding file snapshot from within the active config directory.
+        The operation is transactional and updates the manifest only upon success.
+
+        Args:
+            paths_to_remove: A list of file or directory paths whose managed links should be removed.
+            dry_run: If True, only print the actions that would be taken.
+        """
+        active_config_name = self._get_active_config_name_unlocked()
+        if not active_config_name:
+            raise ConfigActiveError("Cannot remove: No configuration is currently active.")
+
+        active_config_path = self._get_config_path(active_config_name)
+
+        if dry_run:
+            print(f"--- Dry Run: Removing paths from active config '{active_config_name}' ---")
+
+        # --- Phase 1: Planning and Validation ---
+        current_manifest = self._read_manifest()
+        if not current_manifest:
+            print("Manifest is empty. Nothing to remove.")
+            return
+
+        relative_paths_to_remove_spec: Set[Path] = set()
+        for p_str in paths_to_remove:
+            abs_path = Path(p_str).resolve()
+            try:
+                relative_paths_to_remove_spec.add(abs_path.relative_to(self.base_dir))
+            except ValueError:
+                raise ValueError(f"Path '{p_str}' is not inside the base directory '{self.base_dir}'.")
+
+        manifest_entries_to_delete: Set[Path] = set()
+        for spec_path in relative_paths_to_remove_spec:
+            for manifest_path in current_manifest:
+                if manifest_path == spec_path or spec_path in manifest_path.parents:
+                    manifest_entries_to_delete.add(manifest_path)
+
+        if not manifest_entries_to_delete:
+            # Use a more specific exception for better error handling
+            raise PathNotInConfigError(
+                f"None of the specified paths {paths_to_remove} are managed by the active configuration manifest.")
+
+        if dry_run:
+            print(f"The following {len(manifest_entries_to_delete)} items would be removed:")
+            for rel_path in sorted(list(manifest_entries_to_delete)):
+                print(f"  - UNLINK      '{self.base_dir / rel_path}'")
+                print(f"  - DELETE_COPY '{active_config_path / rel_path}'")
+            print("--- End of Dry Run ---")
+            return
+
+        # --- Phase 2: Execution ---
+        logging.info(f"Removing {len(manifest_entries_to_delete)} item(s) from '{active_config_name}'.")
+
+        try:
+            # Iterate in reverse to remove files before their parent directories
+            for rel_path in reversed(sorted(list(manifest_entries_to_delete))):
+                link_path = self.base_dir / rel_path
+                copied_file_path = active_config_path / rel_path
+
+                # Step 1: Unlink from base directory
+                if link_path.is_symlink():
+                    link_path.unlink()
+                else:
+                    logging.warning(f"Manifest path '{link_path}' was not a symlink. Skipping unlink.")
+
+                # Step 2: Delete the copied file from the config directory
+                if copied_file_path.is_file():
+                    copied_file_path.unlink()
+                    # Step 3 (Bonus): Clean up empty parent directories
+                    try:
+                        parent = copied_file_path.parent
+                        while parent != active_config_path and not any(parent.iterdir()):
+                            parent.rmdir()
+                            parent = parent.parent
+                    except OSError as e:
+                        logging.warning(f"Could not clean up empty directory: {e}")
+                else:
+                    logging.warning(f"Copied file '{copied_file_path}' not found or is not a file. Skipping deletion.")
+
+            # --- Phase 3: Commit ---
+            new_manifest_paths = [p for p in current_manifest if p not in manifest_entries_to_delete]
+            self._write_manifest(new_manifest_paths)
+
+            print(f"Successfully removed specified paths from '{active_config_name}'.")
+            logging.info("Removal complete and manifest updated.")
+        except Exception as e:
+            logging.critical(
+                f"A critical error occurred during removal: {e}. The manifest may be out of sync.", exc_info=True)
+            raise ConfigError(
+                "Removal failed and the manifest has NOT been updated. Manual cleanup may be required.") from e
