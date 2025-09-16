@@ -701,10 +701,9 @@ class ConfigManager:
                 req = urllib.request.Request(
                     url, headers={"User-Agent": "whl-conf-cli/1.0"}
                 )
-                with (
-                    urllib.request.urlopen(req) as response,
-                    open(zip_path, "wb") as out_file,
-                ):
+                with urllib.request.urlopen(req) as response, open(
+                    zip_path, "wb"
+                ) as out_file:
                     shutil.copyfileobj(response, out_file)
             except urllib.error.URLError as e:
                 raise ConfigError(
