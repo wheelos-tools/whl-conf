@@ -678,9 +678,11 @@ class ConfigManager:
             ConfigError: For network errors, file errors, or if the zip archive
                         is invalid.
         """
-        url = "https://github.com/wheelos/wheel.os/releases/download/v1.0.0/{}.zip".format(
-            config_name
-        )
+
+        base_url = os.environ.get("WHEELOS_RESOURCE_URL", "https://github.com/wheelos/vehicles-config/releases/download/v1.0.0")
+
+        url = f"{base_url}/{config_name}.zip"
+
         logging.info(f"Attempting to pull configuration '{config_name}' from {url}")
         target_path = self._get_config_path(config_name)
         if self._config_exists(config_name):
