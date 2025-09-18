@@ -46,8 +46,12 @@ def handle_info(manager: ConfigManager, args: argparse.Namespace):
 def handle_create(manager: ConfigManager, args: argparse.Namespace):
     """Handle 'create' command"""
     manager.create_config(args.template_name, args.new_config_name)
-    logging.info(
-        f"Config '{args.new_config_name}' successfully created from template '{args.template_name}'.")
+    if args.template_name:
+        logging.info(
+            f"Config '{args.new_config_name}' successfully created from template '{args.template_name}'.")
+    else:
+        logging.info(
+            f"Config '{args.new_config_name}' successfully created from source code.")
 
 
 def handle_delete(manager: ConfigManager, args: argparse.Namespace):
@@ -122,8 +126,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser_create.add_argument(
         "template_name",
         nargs="?",
-        default="template",
-        help="Template config name (default: 'template')"
+        help="Template config name"
     )
     parser_create.add_argument("new_config_name", help="New config name")
     # 4. delete

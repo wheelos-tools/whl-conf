@@ -1,0 +1,15 @@
+config_id: '550e8400-e29b-41d4-a716-446655440000'
+version: '1.0.0'
+description: 'template config'
+
+maintainers:
+  - name: 'QA Team'
+    email: 'qa@wheelos.cn'
+    role: 'Quality Assurance'
+
+created_at: '2024-06-10T12:00:00Z'
+updated_at: '2024-06-21T08:30:00Z'
+
+vehicle_vin: 'wheelos001'
+hardware_hash: '1.0.0'
+wheelos_hash: '1.0.0'
