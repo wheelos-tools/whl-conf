@@ -122,8 +122,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser_create.add_argument(
         "template_name",
         nargs="?",
-        default="template",
-        help="Template config name (default: 'template')"
+        help="Template config name"
     )
     parser_create.add_argument("new_config_name", help="New config name")
     # 4. delete

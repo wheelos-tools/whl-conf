@@ -1,7 +1,5 @@
 import logging
 import shutil
-import uuid
-from datetime import datetime, timezone
 import os
 import json
 from pathlib import Path
@@ -10,11 +8,11 @@ import urllib.request
 import zipfile
 import shutil
 import tempfile
-import importlib.resources
 
 from whl_conf.meta import MetaManager, MetaError
 from whl_conf.confs_lock import attribute_lock, LockError
 from whl_conf.config_compare import ConfigComparator
+from whl_conf.utils import read_resource_content
 
 # Use logging instead of print for library-level code
 logger = logging.getLogger(__name__)
@@ -331,14 +329,6 @@ class ConfigManager:
                         all_files.add(item)
         return all_files
 
-    def _get_default_template_path(self):
-        """Safely gets the path to the default template packaged with the library."""
-        try:
-            return importlib.resources.files('data')
-        except ModuleNotFoundError:
-            raise RuntimeError(
-                "Could not locate the default template data files.")
-
     # --- Public API Methods (Locked) ---
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
@@ -461,8 +451,7 @@ class ConfigManager:
                 # --- 4. Creation from Default Template  ---
                 description = "Created from default template"
                 try:
-                    template_content = importlib.resources.files('whl_conf.data').joinpath(
-                        'default_template.yaml').read_text(encoding='utf-8')
+                    template_content = read_resource_content('data', 'default_template.yaml')
                     # Use a more descriptive name for the list of items
                     template_items = template_content.splitlines()
                 except (ModuleNotFoundError, FileNotFoundError) as e:
@@ -503,12 +492,7 @@ class ConfigManager:
 
             # --- 5. Metadata Update ---
             meta_mgr = self._get_meta_manager_for(new_config_name)
-            meta_mgr.update(
-                config_id=str(uuid.uuid4()),
-                created_at=datetime.now(timezone.utc),
-                description=description,
-            )
-            meta_mgr.save()
+            meta_mgr.create_from_template()
 
         except (OSError, MetaError, FileNotFoundError, RuntimeError) as e:
             raise ConfigError(
@@ -516,7 +500,7 @@ class ConfigManager:
 
         finally:
             meta_file = self._get_meta_manager_for(
-                new_config_name).meta_file_path
+                new_config_name).meta_path
             if not meta_file.exists():
                 if new_config_path.exists():
                     shutil.rmtree(new_config_path, ignore_errors=True)

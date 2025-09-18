@@ -4,7 +4,10 @@ from typing import Dict, Any, Optional, List, Union
 from datetime import datetime, timezone
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field, asdict
+
+from whl_conf.utils import read_resource_content
 
 # --- Custom Exceptions (Unchanged, they are well-defined) ---
 
@@ -242,12 +245,62 @@ class MetaManager:
         self.config_path = Path(config_path)
         self.meta_path = self.config_path / self.META_FILENAME
         self._meta_info: Optional[MetaInfo] = None
-        # We remove the automatic load from __init__ to make the behavior
-        # more predictable. Loading now happens explicitly or lazily.
 
     def exists(self) -> bool:
         """Checks if the meta.yaml file exists on disk."""
         return self.meta_path.is_file()
+
+    def create_from_template(
+        self,
+        override_data: Optional[Dict[str, Any]] = None,
+        template_name: str = "meta.yaml"
+    ) -> MetaInfo:
+        """
+        Create a new meta.yaml from a template file.
+        This method is atomic: it fills in key fields and saves to disk in one step.
+
+        Args:
+            override_data (Optional[Dict]): A dictionary to override default values from the template.
+            template_name (str): The template file name, which should be located in the 'whl_conf.data' package.
+
+        Returns:
+            The newly created and saved MetaInfo object.
+
+        Raises:
+            Exception: If the meta.yaml file already exists.
+            RuntimeError: If the template file cannot be found.
+            MetaError: For other errors during creation or saving.
+        """
+        # 1. Precondition: do not overwrite existing metadata file
+        if self.exists():
+            raise Exception(
+                f"Metadata file already exists at '{self.meta_path}'. Cannot create.")
+
+        # 2. Load base template
+        try:
+            template_content = read_resource_content('whl_conf.data', template_name)
+            template_data = yaml.safe_load(template_content) or {}
+        except (ModuleNotFoundError, FileNotFoundError, yaml.YAMLError) as e:
+            raise RuntimeError(
+                f"Failed to load or parse metadata template '{template_name}'. Ensure 'whl_conf.data' package is installed.") from e
+
+        # 3. Merge override data into template data
+        if override_data:
+            template_data.update(override_data)
+
+        # 4. Auto-fill key fields: ensure uniqueness and accurate timestamps
+        now_utc = datetime.now(timezone.utc)
+        template_data['config_id'] = str(uuid.uuid4())
+        template_data['created_at'] = now_utc
+        template_data['updated_at'] = now_utc
+
+        # 5. Create MetaInfo object for validation
+        self._meta_info = MetaInfo.from_dict(template_data)
+
+        # 6. Save to disk
+        self.save()
+
+        return self._meta_info
 
     def load(self, force_reload: bool = False) -> MetaInfo:
         """
@@ -275,7 +328,7 @@ class MetaManager:
                 data = yaml.safe_load(f) or {}
             self._meta_info = MetaInfo.from_dict(data)
             return self._meta_info
-        except (yaml.YAMLError, Exception) as e: # Catch broader exceptions during parsing
+        except (yaml.YAMLError, Exception) as e:
             raise MetaFormatError(
                 f"Invalid or corrupt meta file '{self.meta_path}': {e}") from e
 
