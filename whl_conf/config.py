@@ -451,7 +451,7 @@ class ConfigManager:
                 # --- 4. Creation from Default Template  ---
                 description = "Created from default template"
                 try:
-                    template_content = read_resource_content('data', 'default_template.yaml')
+                    template_content = read_resource_content('whl_conf.data', 'default_template.yaml')
                     # Use a more descriptive name for the list of items
                     template_items = template_content.splitlines()
                 except (ModuleNotFoundError, FileNotFoundError) as e:

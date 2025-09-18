@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 # Python version requirements.
-requires-python = ">=3.6" # Consider >=3.8 or >=3.9 for newer features/security
+requires-python = ">=3.6"
 
 # Runtime dependencies
 dependencies = [
@@ -43,12 +43,15 @@ keywords = ["whl-conf", "wheelos", "configuration-management", "cli-tool"]
 
 [project.scripts]
 # Command-line entry points.
-whl-conf = "whl_conf.cli:main" # Match CLI name to project name for consistency
+whl-conf = "whl_conf.cli:main"
 
 [tool.setuptools]
-package-dir = { "" = "." } # Root directory for Python packages
+package-dir = { "" = "." }
+include-package-data = true
 
 [tool.setuptools.packages.find]
-# Automatically discover Python packages.
 where = ["."]
 # exclude = ["tests*", "docs*"]
+
+[tool.setuptools.package-data]
+whl_conf = ["data/*.yaml"]
