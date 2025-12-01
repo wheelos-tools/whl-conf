@@ -4,7 +4,7 @@ description: 'template config'
 
 maintainers:
   - name: 'QA Team'
-    email: 'qa@wheelos.cn'
+    email: 'support@wheelos.cn'
     role: 'Quality Assurance'
 
 created_at: '2024-06-10T12:00:00Z'

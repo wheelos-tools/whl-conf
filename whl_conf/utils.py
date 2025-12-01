@@ -1,3 +1,23 @@
+#!/usr/bin/env python
+
+# Copyright 2025 The WheelOS Team. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Created Date: 2025-07-01
+# Author: daohu527@gmail.com
+
+
 import importlib.resources
 import sys
 
@@ -5,7 +25,13 @@ import sys
 def read_resource_content(module_name, resource_name):
     """Reads the content of a resource file with Python version compatibility."""
     if sys.version_info >= (3, 9):
-        return importlib.resources.files(module_name).joinpath(resource_name).read_text(encoding='utf-8')
+        return (
+            importlib.resources.files(module_name)
+            .joinpath(resource_name)
+            .read_text(encoding="utf-8")
+        )
     else:
-        with importlib.resources.open_text(module_name, resource_name, encoding='utf-8') as f:
+        with importlib.resources.open_text(
+            module_name, resource_name, encoding="utf-8"
+        ) as f:
             return f.read()
