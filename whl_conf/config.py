@@ -1,3 +1,23 @@
+#!/usr/bin/env python
+
+# Copyright 2025 The WheelOS Team. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Created Date: 2025-07-01
+# Author: daohu527@gmail.com
+
+
 import logging
 import shutil
 import os
@@ -146,8 +166,7 @@ class ConfigManager:
     def _write_manifest(self, relative_paths: List[Path]):
         """Atomically write the manifest file."""
         paths_as_str = [str(p) for p in relative_paths]
-        temp_path = self.manifest_path.with_suffix(
-            f".tmp-{os.urandom(4).hex()}")
+        temp_path = self.manifest_path.with_suffix(f".tmp-{os.urandom(4).hex()}")
         with temp_path.open("w") as f:
             json.dump(paths_as_str, f, indent=2)
         os.rename(temp_path, self.manifest_path)
@@ -216,8 +235,7 @@ class ConfigManager:
             ConfigNotFoundError: If the configuration does not exist.
         """
         if not self._config_exists(config_name):
-            raise ConfigNotFoundError(
-                f"Configuration '{config_name}' not found.")
+            raise ConfigNotFoundError(f"Configuration '{config_name}' not found.")
 
         config_path = self._get_config_path(config_name)
 
@@ -292,8 +310,7 @@ class ConfigManager:
     def _update_current_link_unlocked(self, target_path: Path):
         """Atomically updates the 'current' symlink to point to the target path."""
         # Create a temporary link first
-        temp_link = self.current_link_path.with_suffix(
-            f".tmp-{os.urandom(4).hex()}")
+        temp_link = self.current_link_path.with_suffix(f".tmp-{os.urandom(4).hex()}")
 
         # Point the temporary link to the new target directory
         temp_link.symlink_to(target_path.resolve())
@@ -318,8 +335,7 @@ class ConfigManager:
         for path_str in source_paths:
             source_path = Path(path_str).resolve()
             if not source_path.exists():
-                raise FileNotFoundError(
-                    f"Source path '{path_str}' does not exist.")
+                raise FileNotFoundError(f"Source path '{path_str}' does not exist.")
 
             if source_path.is_file():
                 all_files.add(source_path)
@@ -354,24 +370,21 @@ class ConfigManager:
                 if config["is_active"]:
                     has_active = True
 
-                print(
-                    f"{prefix}{config['name']:<25} | {config['description']}")
+                print(f"{prefix}{config['name']:<25} | {config['description']}")
 
             print("-" * 45)
             if has_active:
                 print("(* = active configuration)")
 
         except LockError as e:
-            logging.error(
-                f"Failed to list configurations due to a lock error: {e}")
+            logging.error(f"Failed to list configurations due to a lock error: {e}")
             print(f"\n[Error] Could not acquire lock. Please try again.")
         except Exception as e:
             logging.error(
                 f"An unexpected error occurred while listing configurations: {e}",
                 exc_info=True,
             )
-            print(
-                f"\n[Error] An unexpected error occurred. Check logs for details.")
+            print(f"\n[Error] An unexpected error occurred. Check logs for details.")
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def show_config(self, config_name: str) -> None:
@@ -394,8 +407,7 @@ class ConfigManager:
             print("-" * 40)
 
             # Step 2: Print the basic, non-metadata information
-            print(
-                f"  Status : {'Active' if details['isActive'] else 'Inactive'}")
+            print(f"  Status : {'Active' if details['isActive'] else 'Inactive'}")
             print(f"  Path   : {details['path']}")
             if isinstance(details["sizeKB"], (int, float)):
                 print(f"  Size   : {details['sizeKB']:.2f} KB")
@@ -428,7 +440,8 @@ class ConfigManager:
             raise ValueError("'current' is a reserved name.")
         if self._config_exists(new_config_name):
             raise ConfigAlreadyExistsError(
-                f"Configuration '{new_config_name}' already exists.")
+                f"Configuration '{new_config_name}' already exists."
+            )
 
         new_config_path = self._get_config_path(new_config_name)
         description = ""
@@ -441,26 +454,30 @@ class ConfigManager:
                 # --- 3. Creation from Named Template  ---
                 if not self._config_exists(template_name):
                     raise ConfigNotFoundError(
-                        f"Template configuration '{template_name}' not found.")
+                        f"Template configuration '{template_name}' not found."
+                    )
 
                 template_path = self._get_config_path(template_name)
-                shutil.copytree(template_path, new_config_path,
-                                dirs_exist_ok=True)
+                shutil.copytree(template_path, new_config_path, dirs_exist_ok=True)
                 description = f"Created from template '{template_name}'"
             else:
                 # --- 4. Creation from Default Template  ---
                 description = "Created from default template"
                 try:
-                    template_content = read_resource_content('whl_conf.data', 'default_template.yaml')
+                    template_content = read_resource_content(
+                        "whl_conf.data", "default_template.yaml"
+                    )
                     # Use a more descriptive name for the list of items
                     template_items = template_content.splitlines()
                 except (ModuleNotFoundError, FileNotFoundError) as e:
                     raise RuntimeError(
-                        "Could not locate the default template data files package 'whl_conf.data'.") from e
+                        "Could not locate the default template data files package 'whl_conf.data'."
+                    ) from e
 
                 if not template_items:
                     print(
-                        "Warning: Default template list is empty. Creating an empty configuration.")
+                        "Warning: Default template list is empty. Creating an empty configuration."
+                    )
 
                 # Process each item (file or directory) from the template list
                 for item_str in template_items:
@@ -474,15 +491,14 @@ class ConfigManager:
 
                     if not source_path.exists():
                         print(
-                            f"Warning: Default template item not found at: {source_path}")
+                            f"Warning: Default template item not found at: {source_path}"
+                        )
                         continue
 
                     if source_path.is_dir():
                         # If it's a directory, copy the entire tree
-                        shutil.copytree(source_path, dest_path,
-                                        dirs_exist_ok=True)
-                        print(
-                            f"Copied directory: {source_path} -> {dest_path}")
+                        shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
+                        print(f"Copied directory: {source_path} -> {dest_path}")
 
                     elif source_path.is_file():
                         # If it's a file, ensure parent directory exists and copy the file
@@ -496,15 +512,14 @@ class ConfigManager:
 
         except (OSError, MetaError, FileNotFoundError, RuntimeError) as e:
             raise ConfigError(
-                f"Failed to create config '{new_config_name}': {e}") from e
+                f"Failed to create config '{new_config_name}': {e}"
+            ) from e
 
         finally:
-            meta_file = self._get_meta_manager_for(
-                new_config_name).meta_path
+            meta_file = self._get_meta_manager_for(new_config_name).meta_path
             if not meta_file.exists():
                 if new_config_path.exists():
                     shutil.rmtree(new_config_path, ignore_errors=True)
-
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def delete_config(self, config_name: str):
@@ -512,18 +527,15 @@ class ConfigManager:
         if config_name in ["current"]:
             raise ValueError(f"'current' is a reserved name.")
         if not self._config_exists(config_name):
-            raise ConfigNotFoundError(
-                f"Configuration '{config_name}' not found.")
+            raise ConfigNotFoundError(f"Configuration '{config_name}' not found.")
         if config_name == self._get_active_config_name_unlocked():
-            raise ConfigError(
-                "Cannot delete the currently active configuration.")
+            raise ConfigError("Cannot delete the currently active configuration.")
 
         config_path = self._get_config_path(config_name)
         try:
             shutil.rmtree(config_path)
         except OSError as e:
-            raise ConfigPermissionError(
-                f"Failed to delete '{config_name}': {e}") from e
+            raise ConfigPermissionError(f"Failed to delete '{config_name}': {e}") from e
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def activate_config(self, config_name: str, dry_run: bool = False) -> None:
@@ -589,8 +601,7 @@ class ConfigManager:
                 f"[DRY RUN] The following {len(actions_to_perform)} links would be managed:"
             )
             for act in actions_to_perform:
-                print(
-                    f"  - {act['action']:<15} '{act['link']}' -> '{act['target']}'")
+                print(f"  - {act['action']:<15} '{act['link']}' -> '{act['target']}'")
             print("--- End of Dry Run ---")
             return
 
@@ -616,15 +627,13 @@ class ConfigManager:
             self._write_manifest(newly_created_paths)
             self._update_current_link_unlocked(source_config_path)
             print(f"Successfully activated configuration '{config_name}'.")
-            logging.info(
-                f"Successfully activated configuration '{config_name}'.")
+            logging.info(f"Successfully activated configuration '{config_name}'.")
         except Exception as e:
             logging.error(
                 f"Failed to activate configuration '{config_name}': {e}", exc_info=True
             )
             self._rollback_creation(newly_created_paths)
-            raise ConfigError(
-                f"Activation failed and has been rolled back.") from e
+            raise ConfigError(f"Activation failed and has been rolled back.") from e
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def diff_configs(self, config1_name: str, config2_name: str) -> Dict[str, Any]:
@@ -720,8 +729,7 @@ class ConfigManager:
             # so a complex rollback is rarely needed. We catch OS errors
             # and wrap them in our custom exception type.
             logging.error(f"An OS error occurred during rename: {e}")
-            raise ConfigError(
-                f"Failed to rename '{old_name}' to '{new_name}'.") from e
+            raise ConfigError(f"Failed to rename '{old_name}' to '{new_name}'.") from e
 
     @attribute_lock(attr_name="confs_dir", timeout=60.0)
     def pull_config(self, config_name: str) -> None:
@@ -744,12 +752,13 @@ class ConfigManager:
         """
 
         base_url = os.environ.get(
-            "WHEELOS_RESOURCE_URL", "https://github.com/wheelos/vehicles-config/releases/download/v1.0.0")
+            "WHEELOS_RESOURCE_URL",
+            "https://github.com/wheelos/vehicles-config/releases/download/v1.0.0",
+        )
 
         url = f"{base_url}/{config_name}.zip"
 
-        logging.info(
-            f"Attempting to pull configuration '{config_name}' from {url}")
+        logging.info(f"Attempting to pull configuration '{config_name}' from {url}")
         target_path = self._get_config_path(config_name)
         if self._config_exists(config_name):
             raise ConfigAlreadyExistsError(
@@ -802,8 +811,7 @@ class ConfigManager:
                 )
             else:
                 source_dir = unpacked_root
-                logging.debug(
-                    "Zip contents will be used directly from the root.")
+                logging.debug("Zip contents will be used directly from the root.")
 
             # 4. Move the final, unpacked directory to the target location.
             # This is the final atomic operation.
@@ -834,14 +842,12 @@ class ConfigManager:
         """
         active_config_name = self._get_active_config_name_unlocked()
         if not active_config_name:
-            raise ConfigActiveError(
-                "Cannot add: No configuration is currently active.")
+            raise ConfigActiveError("Cannot add: No configuration is currently active.")
 
         active_config_path = self._get_config_path(active_config_name)
 
         if dry_run:
-            print(
-                f"--- Dry Run: Adding to active config '{active_config_name}' ---")
+            print(f"--- Dry Run: Adding to active config '{active_config_name}' ---")
 
         # --- Phase 1: Planning and Validation ---
         actions_to_perform = []
@@ -886,10 +892,8 @@ class ConfigManager:
                 f"The following {len(actions_to_perform)} actions would be performed:"
             )
             for act in actions_to_perform:
-                print(
-                    f"  - COPY '{act['source']}'\n    -> TO '{act['copy_dest']}'")
-                print(
-                    f"  - LINK '{act['link']}'\n    -> TO '{act['copy_dest']}'")
+                print(f"  - COPY '{act['source']}'\n    -> TO '{act['copy_dest']}'")
+                print(f"  - LINK '{act['link']}'\n    -> TO '{act['copy_dest']}'")
             print("--- End of Dry Run ---")
             return
 
@@ -937,8 +941,7 @@ class ConfigManager:
             logging.info("Add operation complete and manifest updated.")
 
         except Exception as e:
-            logging.error(
-                f"Failed to add to configuration: {e}", exc_info=True)
+            logging.error(f"Failed to add to configuration: {e}", exc_info=True)
             print("Error occurred. Rolling back changes...")
 
             # Rollback in reverse order of creation
@@ -949,8 +952,7 @@ class ConfigManager:
 
             # An additional step could be to clean up empty directories created
             logging.info("Rollback complete.")
-            raise ConfigError(
-                "Add operation failed and has been rolled back.") from e
+            raise ConfigError("Add operation failed and has been rolled back.") from e
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def remove_active_config(self, paths_to_remove: List[str], dry_run: bool = False):
@@ -990,8 +992,7 @@ class ConfigManager:
         for p_str in paths_to_remove:
             abs_path = Path(p_str).resolve()
             try:
-                relative_paths_to_remove_spec.add(
-                    abs_path.relative_to(self.base_dir))
+                relative_paths_to_remove_spec.add(abs_path.relative_to(self.base_dir))
             except ValueError:
                 raise ValueError(
                     f"Path '{p_str}' is not inside the base directory '{self.base_dir}'."
@@ -1050,8 +1051,7 @@ class ConfigManager:
                             parent.rmdir()
                             parent = parent.parent
                     except OSError as e:
-                        logging.warning(
-                            f"Could not clean up empty directory: {e}")
+                        logging.warning(f"Could not clean up empty directory: {e}")
                 else:
                     logging.warning(
                         f"Copied file '{copied_file_path}' not found or is not a file. Skipping deletion."
@@ -1063,8 +1063,7 @@ class ConfigManager:
             ]
             self._write_manifest(new_manifest_paths)
 
-            print(
-                f"Successfully removed specified paths from '{active_config_name}'.")
+            print(f"Successfully removed specified paths from '{active_config_name}'.")
             logging.info("Removal complete and manifest updated.")
         except Exception as e:
             logging.critical(

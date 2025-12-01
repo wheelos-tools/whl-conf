@@ -1,3 +1,23 @@
+#!/usr/bin/env python
+
+# Copyright 2025 The WheelOS Team. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Created Date: 2025-07-01
+# Author: daohu527@gmail.com
+
+
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
@@ -59,7 +79,8 @@ def _is_semver_like(v: str) -> bool:
     if not isinstance(v, str):
         return False
     semver_pattern = re.compile(
-        r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$")
+        r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+    )
     return bool(semver_pattern.match(v))
 
 
@@ -67,6 +88,7 @@ def _is_semver_like(v: str) -> bool:
 @dataclass
 class Maintainer:
     """A data model for a maintainer, with built-in validation."""
+
     name: str
     email: str = ""
     role: str = ""
@@ -74,8 +96,7 @@ class Maintainer:
     def __post_init__(self):
         """Perform validation and normalization after initialization."""
         if not self.name or not isinstance(self.name, str):
-            raise MetaValidationError(
-                "Maintainer 'name' must be a non-empty string.")
+            raise MetaValidationError("Maintainer 'name' must be a non-empty string.")
         self.name = self.name.strip()
         self.email = str(self.email).strip()
         self.role = str(self.role).strip()
@@ -87,6 +108,7 @@ class MetaInfo:
     A self-validating data class for configuration metadata.
     It uses modern dataclasses to define its structure and handle serialization.
     """
+
     # --- Required & Core Fields ---
     version: str
     config_id: str
@@ -111,52 +133,53 @@ class MetaInfo:
         """Post-initialization validation and normalization."""
         if not _is_semver_like(self.version):
             raise MetaValidationError(
-                f"Version '{self.version}' is not a valid semantic version.")
+                f"Version '{self.version}' is not a valid semantic version."
+            )
         # Ensure tags are unique and sorted
         if self.tags:
-            self.tags = sorted(list(set(str(t).strip()
-                               for t in self.tags if str(t).strip())))
+            self.tags = sorted(
+                list(set(str(t).strip() for t in self.tags if str(t).strip()))
+            )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MetaInfo":
         """Factory method to create a MetaInfo instance from a dictionary."""
         if not isinstance(data, dict):
-            raise MetaFormatError(
-                f"Metadata must be a dictionary, got {type(data)}.")
+            raise MetaFormatError(f"Metadata must be a dictionary, got {type(data)}.")
 
         # Separate known fields from extra fields
         known_field_names = {f.name for f in cls.__dataclass_fields__.values()}
         init_data = {k: v for k, v in data.items() if k in known_field_names}
-        extra_data = {k: v for k,
-                      v in data.items() if k not in known_field_names}
+        extra_data = {k: v for k, v in data.items() if k not in known_field_names}
 
         # --- Handle special field conversions ---
         # Maintainers: Convert list of dicts to list of Maintainer objects
-        if 'maintainers' in init_data and isinstance(init_data['maintainers'], list):
+        if "maintainers" in init_data and isinstance(init_data["maintainers"], list):
             try:
-                init_data['maintainers'] = [Maintainer(
-                    **m) for m in init_data['maintainers']]
+                init_data["maintainers"] = [
+                    Maintainer(**m) for m in init_data["maintainers"]
+                ]
             except (TypeError, MetaValidationError) as e:
-                raise MetaFormatError(
-                    f"Invalid 'maintainers' structure: {e}") from e
+                raise MetaFormatError(f"Invalid 'maintainers' structure: {e}") from e
 
         # Timestamps: Convert ISO strings to datetime objects
         now = datetime.now(timezone.utc)
-        init_data['created_at'] = _from_iso(
-            init_data.get('created_at', '')) or now
+        init_data["created_at"] = _from_iso(init_data.get("created_at", "")) or now
         # If updated_at is missing or invalid, it defaults to created_at
-        init_data['updated_at'] = _from_iso(init_data.get(
-            'updated_at', '')) or init_data['created_at']
+        init_data["updated_at"] = (
+            _from_iso(init_data.get("updated_at", "")) or init_data["created_at"]
+        )
 
         # Add extras
-        init_data['extra_fields'] = extra_data
+        init_data["extra_fields"] = extra_data
 
         try:
             return cls(**init_data)
         except (TypeError, MetaValidationError) as e:
             # Catches missing required fields like 'version' or 'config_id'
             raise MetaFormatError(
-                f"Failed to create MetaInfo from dictionary: {e}") from e
+                f"Failed to create MetaInfo from dictionary: {e}"
+            ) from e
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes the object to a dictionary for YAML/JSON output."""
@@ -164,19 +187,23 @@ class MetaInfo:
         data = asdict(self)
 
         # Pop the extra_fields container and merge its contents
-        extras = data.pop('extra_fields', {})
+        extras = data.pop("extra_fields", {})
         data.update(extras)
 
         # Convert datetimes to ISO strings
-        data['created_at'] = _to_iso(self.created_at)
-        data['updated_at'] = _to_iso(self.updated_at)
+        data["created_at"] = _to_iso(self.created_at)
+        data["updated_at"] = _to_iso(self.updated_at)
 
         # Filter out fields that are None or empty lists, except for required ones
-        required_fields = {'version', 'config_id',
-                           'created_at', 'updated_at', 'maintainers'}
+        required_fields = {
+            "version",
+            "config_id",
+            "created_at",
+            "updated_at",
+            "maintainers",
+        }
         return {
-            key: value for key, value in data.items()
-            if value or key in required_fields
+            key: value for key, value in data.items() if value or key in required_fields
         }
 
     def pretty_print(self) -> None:
@@ -189,9 +216,17 @@ class MetaInfo:
         # Define the desired order of keys for printing
         # This also filters which keys to show, matching the user request
         display_order = [
-            'version', 'config_id', 'description', 'maintainers',
-            'vehicle_vin', 'hardware_hash', 'wheelos_hash',
-            'tags', 'notes', 'created_at', 'updated_at'
+            "version",
+            "config_id",
+            "description",
+            "maintainers",
+            "vehicle_vin",
+            "hardware_hash",
+            "wheelos_hash",
+            "tags",
+            "notes",
+            "created_at",
+            "updated_at",
         ]
 
         # Calculate padding for clean alignment
@@ -209,7 +244,7 @@ class MetaInfo:
                 value = data[key]
                 # Skip printing empty optional fields
                 # Add other must-show fields if any
-                if not value and key not in {'version', 'config_id'}:
+                if not value and key not in {"version", "config_id"}:
                     continue
 
                 # Format values for readability
@@ -231,6 +266,7 @@ class MetaInfo:
                 # Print the aligned key-value pair
                 print(f"    {key:<{max_key_length}} : {display_value}")
 
+
 # --- Manager Class (Largely unchanged, but now interacts with the new MetaInfo) ---
 
 
@@ -239,6 +275,7 @@ class MetaManager:
     Manages the lifecycle (create, load, update, save) of a MetaInfo object
     associated with a configuration.
     """
+
     META_FILENAME = "meta.yaml"
 
     def __init__(self, config_path: Union[Path, str]):
@@ -253,7 +290,7 @@ class MetaManager:
     def create_from_template(
         self,
         override_data: Optional[Dict[str, Any]] = None,
-        template_name: str = "meta.yaml"
+        template_name: str = "meta.yaml",
     ) -> MetaInfo:
         """
         Create a new meta.yaml from a template file.
@@ -274,15 +311,17 @@ class MetaManager:
         # 1. Precondition: do not overwrite existing metadata file
         if self.exists():
             raise Exception(
-                f"Metadata file already exists at '{self.meta_path}'. Cannot create.")
+                f"Metadata file already exists at '{self.meta_path}'. Cannot create."
+            )
 
         # 2. Load base template
         try:
-            template_content = read_resource_content('whl_conf.data', template_name)
+            template_content = read_resource_content("whl_conf.data", template_name)
             template_data = yaml.safe_load(template_content) or {}
         except (ModuleNotFoundError, FileNotFoundError, yaml.YAMLError) as e:
             raise RuntimeError(
-                f"Failed to load or parse metadata template '{template_name}'. Ensure 'whl_conf.data' package is installed.") from e
+                f"Failed to load or parse metadata template '{template_name}'. Ensure 'whl_conf.data' package is installed."
+            ) from e
 
         # 3. Merge override data into template data
         if override_data:
@@ -290,9 +329,9 @@ class MetaManager:
 
         # 4. Auto-fill key fields: ensure uniqueness and accurate timestamps
         now_utc = datetime.now(timezone.utc)
-        template_data['config_id'] = str(uuid.uuid4())
-        template_data['created_at'] = now_utc
-        template_data['updated_at'] = now_utc
+        template_data["config_id"] = str(uuid.uuid4())
+        template_data["created_at"] = now_utc
+        template_data["updated_at"] = now_utc
 
         # 5. Create MetaInfo object for validation
         self._meta_info = MetaInfo.from_dict(template_data)
@@ -322,7 +361,8 @@ class MetaManager:
 
         if not self.exists():
             raise MetaFileNotFoundError(
-                f"Meta file not found at '{self.meta_path}'. Cannot load.")
+                f"Meta file not found at '{self.meta_path}'. Cannot load."
+            )
         try:
             with self.meta_path.open("r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
@@ -330,7 +370,8 @@ class MetaManager:
             return self._meta_info
         except (yaml.YAMLError, Exception) as e:
             raise MetaFormatError(
-                f"Invalid or corrupt meta file '{self.meta_path}': {e}") from e
+                f"Invalid or corrupt meta file '{self.meta_path}': {e}"
+            ) from e
 
     def get_meta(self, lazy_load: bool = True) -> Optional[MetaInfo]:
         """
@@ -348,7 +389,7 @@ class MetaManager:
             try:
                 return self.load()
             except MetaError:
-                return None # Failed to load, so return None
+                return None  # Failed to load, so return None
         return None
 
     def update(self, **kwargs: Any) -> MetaInfo:
@@ -376,7 +417,8 @@ class MetaManager:
             except MetaFileNotFoundError as e:
                 raise MetaError(
                     "Cannot update metadata: No metadata loaded in memory and no "
-                    f"file exists at '{self.meta_path}' to load from.") from e
+                    f"file exists at '{self.meta_path}' to load from."
+                ) from e
 
         # We can now be sure self._meta_info is not None.
         current_data = self._meta_info.to_dict()
@@ -386,8 +428,10 @@ class MetaManager:
         valid_keys = set(current_data.keys())
         for key in kwargs:
             if key not in valid_keys:
-                raise MetaError(f"Invalid metadata field: '{key}'. "
-                                f"Valid fields are: {list(valid_keys)}")
+                raise MetaError(
+                    f"Invalid metadata field: '{key}'. "
+                    f"Valid fields are: {list(valid_keys)}"
+                )
 
         current_data.update(kwargs)
 
@@ -402,8 +446,7 @@ class MetaManager:
         Automatically sets the 'updated_at' timestamp.
         """
         if not self._meta_info:
-            raise MetaError(
-                "No metadata to save. Call create_meta() or load() first.")
+            raise MetaError("No metadata to save. Call create_meta() or load() first.")
 
         # Automatically update the 'updated_at' timestamp on every save
         self._meta_info.updated_at = datetime.now(timezone.utc)
@@ -412,9 +455,13 @@ class MetaManager:
         try:
             with self.meta_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(
-                    self._meta_info.to_dict(), f,
-                    allow_unicode=True, default_flow_style=False, sort_keys=False
+                    self._meta_info.to_dict(),
+                    f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
                 )
         except IOError as e:
             raise MetaError(
-                f"Failed to write to meta file '{self.meta_path}': {e}") from e
+                f"Failed to write to meta file '{self.meta_path}': {e}"
+            ) from e

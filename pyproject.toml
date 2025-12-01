@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whl-conf"
-version = "0.0.6"
+version = "0.0.7"
 description = "A configuration management tool for WheelOS."
 readme = "README.md"
 authors = [

@@ -1,3 +1,23 @@
+#!/usr/bin/env python
+
+# Copyright 2025 The WheelOS Team. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Created Date: 2025-07-01
+# Author: daohu527@gmail.com
+
+
 import hashlib
 from pathlib import Path
 from dataclasses import dataclass
@@ -8,8 +28,8 @@ def _calculate_sha256(file_path: Path, block_size=65536) -> str:
     """Calculates the SHA256 hash of a file."""
     sha256 = hashlib.sha256()
     try:
-        with open(file_path, 'rb') as f:
-            for block in iter(lambda: f.read(block_size), b''):
+        with open(file_path, "rb") as f:
+            for block in iter(lambda: f.read(block_size), b""):
                 sha256.update(block)
         return sha256.hexdigest()
     except (IOError, OSError):
@@ -19,6 +39,7 @@ def _calculate_sha256(file_path: Path, block_size=65536) -> str:
 @dataclass(frozen=True)
 class FileMetadata:
     """A read-only dataclass to hold file metadata for comparison."""
+
     relative_path: Path
     size: int
     mtime: float
@@ -35,12 +56,13 @@ class FileMetadata:
 
 class Colors:
     """A simple helper class for adding color to terminal output."""
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BLUE = '\033[94m'
-    BOLD = '\033[1m'
-    ENDC = '\033[0m'
+
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BLUE = "\033[94m"
+    BOLD = "\033[1m"
+    ENDC = "\033[0m"
 
     # Helper to disable colors if the terminal doesn't support them
     @staticmethod
@@ -66,14 +88,12 @@ class ConfigComparator:
     def _scan_directory(self, root_path: Path) -> Dict[Path, FileMetadata]:
         """Scans a directory recursively and gathers metadata for each file."""
         files_metadata = {}
-        for item in root_path.rglob('*'):
+        for item in root_path.rglob("*"):
             if item.is_file() and item.name != "meta.yaml":
                 relative_path = item.relative_to(root_path)
                 stat = item.stat()
                 files_metadata[relative_path] = FileMetadata(
-                    relative_path=relative_path,
-                    size=stat.st_size,
-                    mtime=stat.st_mtime
+                    relative_path=relative_path, size=stat.st_size, mtime=stat.st_mtime
                 )
         return files_metadata
 
@@ -108,11 +128,21 @@ class ConfigComparator:
             if hash1 and hash1 == hash2:
                 identical.append(str(rel_path))
             else:
-                content_differs.append({
-                    "path": str(rel_path),
-                    self.name1: {"size": meta1.size, "mtime": meta1.mtime, "sha256": hash1},
-                    self.name2: {"size": meta2.size, "mtime": meta2.mtime, "sha256": hash2},
-                })
+                content_differs.append(
+                    {
+                        "path": str(rel_path),
+                        self.name1: {
+                            "size": meta1.size,
+                            "mtime": meta1.mtime,
+                            "sha256": hash1,
+                        },
+                        self.name2: {
+                            "size": meta2.size,
+                            "mtime": meta2.mtime,
+                            "sha256": hash2,
+                        },
+                    }
+                )
 
         return {
             "only_in_config1": sorted([str(p) for p in only_in_1_paths]),
@@ -120,7 +150,7 @@ class ConfigComparator:
             "common_files": {
                 "identical": sorted(identical),
                 "different": content_differs,
-            }
+            },
         }
 
     def format_report(self) -> str:
@@ -147,12 +177,14 @@ class ConfigComparator:
         only_in_1 = report_data["only_in_config1"]
         only_in_2 = report_data["only_in_config2"]
         common = report_data["common_files"]
-        identical_count = len(common['identical'])
-        different_count = len(common['different'])
+        identical_count = len(common["identical"])
+        different_count = len(common["different"])
 
         add(f"  • Files only in (a): {len(only_in_1)}")
         add(f"  • Files only in (b): {len(only_in_2)}")
-        add(f"  • Common Files: {identical_count + different_count} ({identical_count} identical, {different_count} different)")
+        add(
+            f"  • Common Files: {identical_count + different_count} ({identical_count} identical, {different_count} different)"
+        )
 
         # --- Details ---
         add(f"\n{Colors.BOLD}[ DETAILS ]{Colors.ENDC}")
@@ -167,18 +199,20 @@ class ConfigComparator:
             for path in only_in_2:
                 add(f"    {Colors.GREEN}+  {path}{Colors.ENDC}")
 
-        if common['different']:
+        if common["different"]:
             add(f"\n  ── Common Files with Different Content ──")
-            for diff_item in common['different']:
+            for diff_item in common["different"]:
                 add(f"    {Colors.YELLOW}~  {diff_item['path']}{Colors.ENDC}")
                 info1 = diff_item[self.name1]
                 info2 = diff_item[self.name2]
                 add(
-                    f"        (a): {info1['size']/1024:.2f} KB | sha256: {info1['sha256'][:10]}...")
+                    f"        (a): {info1['size']/1024:.2f} KB | sha256: {info1['sha256'][:10]}..."
+                )
                 add(
-                    f"        (b): {info2['size']/1024:.2f} KB | sha256: {info2['sha256'][:10]}...")
+                    f"        (b): {info2['size']/1024:.2f} KB | sha256: {info2['sha256'][:10]}..."
+                )
 
-        if common['identical']:
+        if common["identical"]:
             add(f"\n  ── {len(common['identical'])} identical file(s) not shown ──")
 
         return "\n".join(report_lines)
