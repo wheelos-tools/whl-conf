@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Set
 import urllib.request
 import zipfile
-import shutil
 import tempfile
 
 from whl_conf.meta import MetaManager, MetaError
 from whl_conf.confs_lock import attribute_lock, LockError
 from whl_conf.config_compare import ConfigComparator
+from whl_conf.git_worktree import GitWorktreeError, GitWorktreeManager
 from whl_conf.utils import read_resource_content
 
 # Use logging instead of print for library-level code
@@ -107,6 +107,7 @@ class ConfigManager:
         self.confs_dir = self.base_dir / self.CONF_DIR
         self.manifest_path = self.confs_dir / self.MANIFEST_FILE
         self.current_link_path = self.confs_dir / "current"
+        self.git_worktree = GitWorktreeManager(self.base_dir)
 
     # --- Private Helper Methods ---
 
@@ -170,6 +171,51 @@ class ConfigManager:
         with temp_path.open("w") as f:
             json.dump(paths_as_str, f, indent=2)
         os.rename(temp_path, self.manifest_path)
+
+    @staticmethod
+    def _absolute_without_dereference(path: Path) -> Path:
+        """Normalize an absolute path without following symlinks."""
+        return Path(os.path.abspath(os.fspath(path)))
+
+    def _is_managed_symlink(self, link_path: Path) -> bool:
+        """Return whether a symlink lexically targets the configs directory."""
+        if not link_path.is_symlink():
+            return False
+        try:
+            target = Path(os.readlink(os.fspath(link_path)))
+        except OSError:
+            return False
+        if not target.is_absolute():
+            target = link_path.parent / target
+        target = self._absolute_without_dereference(target)
+        return target == self.confs_dir or self.confs_dir in target.parents
+
+    def _restore_tracked_paths(self, paths: List[Path]) -> None:
+        """Clear skip-worktree and restore tracked paths from the Git index."""
+        try:
+            tracked_paths = self.git_worktree.tracked_paths(paths)
+            self.git_worktree.unset_skip_worktree(tracked_paths)
+            self.git_worktree.restore_worktree(tracked_paths)
+        except GitWorktreeError as e:
+            raise ConfigError(f"Failed to restore Git working-tree files: {e}") from e
+
+    def _set_excluded_untracked_paths(
+        self, paths: List[Path], tracked_paths: Optional[List[Path]] = None
+    ) -> List[Path]:
+        """Replace whl-conf's exclude block with the untracked supplied paths."""
+        try:
+            if tracked_paths is None:
+                tracked_paths = self.git_worktree.tracked_paths(paths)
+            tracked_path_set = set(tracked_paths)
+            untracked_paths = [
+                path for path in paths if path not in tracked_path_set
+            ]
+            self.git_worktree.set_excluded_paths(untracked_paths)
+            return untracked_paths
+        except GitWorktreeError as e:
+            raise ConfigError(
+                f"Failed to update whl-conf paths in Git info/exclude: {e}"
+            ) from e
 
     def _get_all_configs(self) -> List[Dict]:
         """
@@ -275,32 +321,55 @@ class ConfigManager:
             logging.info(
                 "No manifest found or manifest is empty. Nothing to deactivate."
             )
+            self._set_excluded_untracked_paths([])
+            self.manifest_path.unlink(missing_ok=True)
+            self.current_link_path.unlink(missing_ok=True)
             return
 
         logging.info("Deactivating current configuration based on manifest...")
+        paths_to_restore: List[Path] = []
+        parent_directories: Set[Path] = set()
         # Iterate in reverse to handle nested files before their parent directories
         for rel_path in reversed(manifest_entries):
             link_path = self.base_dir / rel_path
 
             # Only remove what we expect to be a symlink managed by us.
             if link_path.is_symlink():
-                try:
-                    # Defensive check: ensure the link points somewhere inside our configs root
-                    if self.confs_dir in link_path.resolve(strict=True).parents:
-                        link_path.unlink()
-                        # Attempt to remove the parent directory if it's now empty
-                        try:
-                            link_path.parent.rmdir()
-                        except OSError:
-                            pass  # Directory not empty, which is fine.
-                except FileNotFoundError:
-                    pass  # Link is broken, ignore.
+                # Defensive check without dereferencing the managed symlink.
+                if self._is_managed_symlink(link_path):
+                    link_path.unlink()
+                    paths_to_restore.append(link_path)
+                    parent_directories.add(link_path.parent)
+                else:
+                    logging.warning(
+                        f"Skipping cleanup of '{link_path}' because its symlink "
+                        "target is not managed by whl-conf."
+                    )
             elif not link_path.exists():
-                pass  # Link already gone, ignore.
+                # The link may have been removed during a previously interrupted
+                # operation. Restoring a tracked entry makes deactivation retryable.
+                paths_to_restore.append(link_path)
+                parent_directories.add(link_path.parent)
             else:
                 logging.warning(
                     f"Skipping cleanup of '{link_path}' because it is a real file, not a symlink."
                 )
+
+        # Git restore must happen after unlinking and after skip-worktree is
+        # cleared. If either Git command fails, retain the manifest/current link
+        # so that the user can retry the deactivation.
+        self._restore_tracked_paths(paths_to_restore)
+        self._set_excluded_untracked_paths([])
+
+        # Remove only directories that remain empty after tracked files have
+        # been restored.
+        for parent_directory in sorted(
+            parent_directories, key=lambda path: len(path.parts), reverse=True
+        ):
+            try:
+                parent_directory.rmdir()
+            except OSError:
+                pass
 
         # Clean up the manifest and the 'current' symlink itself
         self.manifest_path.unlink(missing_ok=True)
@@ -312,28 +381,46 @@ class ConfigManager:
         # Create a temporary link first
         temp_link = self.current_link_path.with_suffix(f".tmp-{os.urandom(4).hex()}")
 
-        # Point the temporary link to the new target directory
-        temp_link.symlink_to(target_path.resolve())
+        try:
+            # Point the temporary link to the new target directory
+            temp_link.symlink_to(target_path.resolve())
 
-        # Atomically rename the temp link to the final name, overwriting the old one.
-        os.rename(temp_link, self.current_link_path)
+            # Atomically rename the temporary link to the final name.
+            os.rename(temp_link, self.current_link_path)
+        finally:
+            temp_link.unlink(missing_ok=True)
 
-    def _rollback_creation(self, paths_to_delete: List[Path]):
-        """Rolls back a failed activation by deleting all paths created."""
+    def _rollback_creation(
+        self, paths_to_delete: List[Path], tracked_paths: List[Path]
+    ):
+        """Roll back links and Git state created during activation or add."""
+        parent_directories: Set[Path] = set()
         for rel_path in reversed(paths_to_delete):
             link_path = self.base_dir / rel_path
             if link_path.is_symlink():
                 link_path.unlink(missing_ok=True)
-                try:
-                    link_path.parent.rmdir()
-                except OSError:
-                    pass  # Not empty, ignore.
+                parent_directories.add(link_path.parent)
+
+        created_absolute_paths = {self.base_dir / path for path in paths_to_delete}
+        tracked_created_paths = [
+            path for path in tracked_paths if path in created_absolute_paths
+        ]
+        self.git_worktree.unset_skip_worktree(tracked_created_paths)
+        self.git_worktree.restore_worktree(tracked_created_paths)
+
+        for parent_directory in sorted(
+            parent_directories, key=lambda path: len(path.parts), reverse=True
+        ):
+            try:
+                parent_directory.rmdir()
+            except OSError:
+                pass
 
     def _resolve_source_paths_to_files(self, source_paths: List[str]) -> Set[Path]:
         """Helper to recursively find all files given a list of paths."""
         all_files: Set[Path] = set()
         for path_str in source_paths:
-            source_path = Path(path_str).resolve()
+            source_path = self._absolute_without_dereference(Path(path_str))
             if not source_path.exists():
                 raise FileNotFoundError(f"Source path '{path_str}' does not exist.")
 
@@ -608,11 +695,17 @@ class ConfigManager:
         # --- Phase 3: Execute Activation (only if not a dry run) ---
         logging.info(f"Activating configuration: '{config_name}'")
         newly_created_paths: List[Path] = []
+        tracked_paths: List[Path] = []
         try:
+            tracked_paths = self.git_worktree.tracked_paths(
+                [act["link"] for act in actions_to_perform]
+            )
             for act in actions_to_perform:
                 link_path = act["link"]
                 item = act["target"]
                 relative_path = item.relative_to(source_config_path)
+                # Record the path before replacing it so a failure between
+                # unlink and symlink creation can still restore a tracked file.
                 newly_created_paths.append(relative_path)
 
                 link_path.parent.mkdir(parents=True, exist_ok=True)
@@ -623,6 +716,13 @@ class ConfigManager:
                         link_path.unlink()
                 link_path.symlink_to(item.resolve())
 
+            # The worktree contains the whl-conf links before the index flag is
+            # set, matching Git's expected activation ordering.
+            self.git_worktree.set_skip_worktree(tracked_paths)
+            self._set_excluded_untracked_paths(
+                [act["link"] for act in actions_to_perform], tracked_paths
+            )
+
             # Commit the new state
             self._write_manifest(newly_created_paths)
             self._update_current_link_unlocked(source_config_path)
@@ -632,8 +732,19 @@ class ConfigManager:
             logging.error(
                 f"Failed to activate configuration '{config_name}': {e}", exc_info=True
             )
-            self._rollback_creation(newly_created_paths)
-            raise ConfigError(f"Activation failed and has been rolled back.") from e
+            try:
+                self._rollback_creation(newly_created_paths, tracked_paths)
+                self._set_excluded_untracked_paths([])
+                self.manifest_path.unlink(missing_ok=True)
+                self.current_link_path.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                raise ConfigError(
+                    "Activation failed, and rollback also failed. "
+                    f"Original error: {e}. Rollback error: {rollback_error}"
+                ) from e
+            raise ConfigError(
+                f"Activation failed and has been rolled back: {e}"
+            ) from e
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def diff_configs(self, config1_name: str, config2_name: str) -> Dict[str, Any]:
@@ -899,8 +1010,21 @@ class ConfigManager:
 
         # --- Phase 2: Execution with Enhanced Rollback ---
         newly_created_copies: List[Path] = []
-        newly_created_links: List[Path] = []
+        replaced_relative_paths: List[Path] = []
+        tracked_paths: List[Path] = []
+        final_manifest_paths = current_manifest_paths.union(
+            {act["relative"] for act in actions_to_perform}
+        )
+        all_managed_paths = [self.base_dir / path for path in final_manifest_paths]
+        previous_untracked_paths: List[Path] = []
         try:
+            tracked_paths = self.git_worktree.tracked_paths(all_managed_paths)
+            tracked_path_set = set(tracked_paths)
+            previous_untracked_paths = [
+                self.base_dir / path
+                for path in current_manifest_paths
+                if self.base_dir / path not in tracked_path_set
+            ]
             logging.info(
                 f"Adding {len(actions_to_perform)} new file(s) to '{active_config_name}'."
             )
@@ -917,6 +1041,7 @@ class ConfigManager:
 
                 # Step 2: Create the symlink, forcefully overwriting any existing target
                 link.parent.mkdir(parents=True, exist_ok=True)
+                replaced_relative_paths.append(act["relative"])
 
                 # Forcefully remove whatever is at the destination path
                 if link.is_symlink():
@@ -927,12 +1052,15 @@ class ConfigManager:
                     shutil.rmtree(link)
 
                 link.symlink_to(copy_dest)
-                newly_created_links.append(link)
+
+            new_link_paths = {act["link"] for act in actions_to_perform}
+            newly_tracked_paths = [
+                path for path in tracked_paths if path in new_link_paths
+            ]
+            self.git_worktree.set_skip_worktree(newly_tracked_paths)
+            self._set_excluded_untracked_paths(all_managed_paths, tracked_paths)
 
             # --- Phase 3: Commit ---
-            final_manifest_paths = current_manifest_paths.union(
-                {act["relative"] for act in actions_to_perform}
-            )
             self._write_manifest(list(final_manifest_paths))
 
             print(
@@ -944,15 +1072,21 @@ class ConfigManager:
             logging.error(f"Failed to add to configuration: {e}", exc_info=True)
             print("Error occurred. Rolling back changes...")
 
-            # Rollback in reverse order of creation
-            for lnk in reversed(newly_created_links):
-                lnk.unlink(missing_ok=True)
-            for cpy in reversed(newly_created_copies):
-                cpy.unlink(missing_ok=True)
+            try:
+                self._rollback_creation(replaced_relative_paths, tracked_paths)
+                self.git_worktree.set_excluded_paths(previous_untracked_paths)
+                for copied_file in reversed(newly_created_copies):
+                    copied_file.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                raise ConfigError(
+                    "Add operation failed, and rollback also failed. "
+                    f"Original error: {e}. Rollback error: {rollback_error}"
+                ) from e
 
-            # An additional step could be to clean up empty directories created
             logging.info("Rollback complete.")
-            raise ConfigError("Add operation failed and has been rolled back.") from e
+            raise ConfigError(
+                f"Add operation failed and has been rolled back: {e}"
+            ) from e
 
     @attribute_lock(attr_name="confs_dir", timeout=10.0)
     def remove_active_config(self, paths_to_remove: List[str], dry_run: bool = False):
@@ -990,7 +1124,9 @@ class ConfigManager:
 
         relative_paths_to_remove_spec: Set[Path] = set()
         for p_str in paths_to_remove:
-            abs_path = Path(p_str).resolve()
+            # Do not resolve here: a managed path is a symlink into data/confs,
+            # and dereferencing it would make manifest matching impossible.
+            abs_path = self._absolute_without_dereference(Path(p_str))
             try:
                 relative_paths_to_remove_spec.add(abs_path.relative_to(self.base_dir))
             except ValueError:
@@ -1026,18 +1162,37 @@ class ConfigManager:
         )
 
         try:
+            new_manifest_paths = [
+                path
+                for path in current_manifest
+                if path not in manifest_entries_to_delete
+            ]
+            paths_to_restore: List[Path] = []
             # Iterate in reverse to remove files before their parent directories
             for rel_path in reversed(sorted(list(manifest_entries_to_delete))):
                 link_path = self.base_dir / rel_path
-                copied_file_path = active_config_path / rel_path
 
                 # Step 1: Unlink from base directory
                 if link_path.is_symlink():
                     link_path.unlink()
+                    paths_to_restore.append(link_path)
+                elif not link_path.exists():
+                    # Makes an interrupted remove operation safe to retry.
+                    paths_to_restore.append(link_path)
                 else:
                     logging.warning(
                         f"Manifest path '{link_path}' was not a symlink. Skipping unlink."
                     )
+
+            # A tracked file must have skip-worktree cleared before restoring
+            # its working-tree content from the index.
+            self._restore_tracked_paths(paths_to_restore)
+
+            remaining_paths = [self.base_dir / path for path in new_manifest_paths]
+            self._set_excluded_untracked_paths(remaining_paths)
+
+            for rel_path in reversed(sorted(list(manifest_entries_to_delete))):
+                copied_file_path = active_config_path / rel_path
 
                 # Step 2: Delete the copied file from the config directory
                 if copied_file_path.is_file():
@@ -1058,9 +1213,6 @@ class ConfigManager:
                     )
 
             # --- Phase 3: Commit ---
-            new_manifest_paths = [
-                p for p in current_manifest if p not in manifest_entries_to_delete
-            ]
             self._write_manifest(new_manifest_paths)
 
             print(f"Successfully removed specified paths from '{active_config_name}'.")
@@ -1071,5 +1223,6 @@ class ConfigManager:
                 exc_info=True,
             )
             raise ConfigError(
-                "Removal failed and the manifest has NOT been updated. Manual cleanup may be required."
+                "Removal failed and the manifest has NOT been updated. "
+                f"Manual cleanup may be required. Details: {e}"
             ) from e

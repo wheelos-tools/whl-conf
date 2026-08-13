@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whl-conf"
-version = "0.0.7"
+version = "0.0.8"
 description = "A configuration management tool for WheelOS."
 readme = "README.md"
 authors = [
@@ -51,7 +51,8 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-# exclude = ["tests*", "docs*"]
+include = ["whl_conf*"]
+exclude = ["build*", "tests*", "docs*"]
 
 [tool.setuptools.package-data]
 whl_conf = ["data/*.yaml"]
